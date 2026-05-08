@@ -117,6 +117,22 @@ void main() {
 const DEFAULT_KNEE_LOW = 0.02
 const DEFAULT_KNEE_HIGH = 0.98
 
+/// Color-key parameters that may change at runtime.  All fields can be
+/// reassigned via {@link ColorKeyRenderer.updateParams} without rebuilding
+/// the GL context, shader program, or texture.
+export type ColorKeyParams = {
+    /// RGB tuples in [0,255] to key out.  Empty = passthrough (the shader
+    /// loop early-exits and alpha pegs to 1).  Capped at {@link MAX_KEYS}.
+    keyColors: [number, number, number][]
+    /// Smoothstep low edge.  Default {@link DEFAULT_KNEE_LOW}.
+    kneeLow?: number
+    /// Smoothstep high edge.  Default {@link DEFAULT_KNEE_HIGH}.
+    kneeHigh?: number
+    /// When set, the kept-pixel RGB is replaced by this constant sRGB
+    /// color while the keyer's soft alpha is preserved.  Skips unspill.
+    binarizationColor?: [number, number, number]
+}
+
 export class ColorKeyRenderer {
     private gl: WebGL2RenderingContext
     private program: WebGLProgram
@@ -124,31 +140,33 @@ export class ColorKeyRenderer {
     private vao: WebGLVertexArrayObject
     private canvas: HTMLCanvasElement
 
+    // ── Cached uniform locations ─────────────────────────────────────────
+    // The program is immutable for the lifetime of this renderer, so we look
+    // these up once at construction and reuse them on every `updateParams`.
+    private uKeyColorsL: WebGLUniformLocation
+    private uKeyCount: WebGLUniformLocation
+    private uKneeLow: WebGLUniformLocation
+    private uKneeHigh: WebGLUniformLocation
+    private uUseBinarization: WebGLUniformLocation
+    private uBinarizationColor: WebGLUniformLocation
+
     /**
      * @param canvas            Target canvas element (will be bound to a WebGL2 context).
-     * @param keyColors         RGB tuples in [0,255] to key out.  May be empty, in which
-     *                          case the shader degenerates to a sRGB-correct passthrough
-     *                          (the loop early-exits, alpha pegs to 1, unspill is a no-op).
-     *                          Capped at {@link MAX_KEYS} entries.
-     * @param kneeLow           Smoothstep low edge — pre-knee alpha ≤ kneeLow becomes
-     *                          0 (noise floor).  Default {@link DEFAULT_KNEE_LOW}.
-     * @param kneeHigh          Smoothstep high edge — pre-knee alpha ≥ kneeHigh becomes
-     *                          1 (snap solid).  Default {@link DEFAULT_KNEE_HIGH}.
-     * @param binarizationColor Optional sRGB tuple in [0,255].  When set, the kept-pixel
-     *                          RGB is replaced by this constant color while the keyer's
-     *                          soft alpha is preserved — turns the color-key into a
-     *                          tinted silhouette mask and skips unspill entirely.
+     * @param keyColors         Initial key colors — see {@link ColorKeyParams.keyColors}.
+     *                          Defaults to `[]` (passthrough); change at runtime via
+     *                          {@link updateParams} without recreating the renderer.
+     * @param kneeLow           Initial low knee — see {@link ColorKeyParams.kneeLow}.
+     * @param kneeHigh          Initial high knee — see {@link ColorKeyParams.kneeHigh}.
+     * @param binarizationColor Initial binarization tint — see
+     *                          {@link ColorKeyParams.binarizationColor}.
      */
     constructor(
         canvas: HTMLCanvasElement,
-        keyColors: [number, number, number][],
+        keyColors: [number, number, number][] = [],
         kneeLow = DEFAULT_KNEE_LOW,
         kneeHigh = DEFAULT_KNEE_HIGH,
         binarizationColor?: [number, number, number],
     ) {
-        if (keyColors.length > MAX_KEYS)
-            throw new Error(`ColorKeyRenderer: at most ${MAX_KEYS} key colors supported (got ${keyColors.length})`)
-
         this.canvas = canvas
 
         const gl = canvas.getContext("webgl2", {
@@ -178,36 +196,67 @@ export class ColorKeyRenderer {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 
-        // ── Upload uniforms ──────────────────────────────────────────────
+        // ── Cache uniform locations & bind sampler ───────────────────────
+        // u_texture is a sampler unit binding that never changes, so we set
+        // it here and never touch it again.  Everything else is cached for
+        // updateParams to push at runtime.
+        gl.useProgram(this.program)
+        gl.uniform1i(getUniform(gl, this.program, "u_texture"), 0)
+        this.uKeyColorsL        = getUniform(gl, this.program, "u_keyColorsL")
+        this.uKeyCount          = getUniform(gl, this.program, "u_keyCount")
+        this.uKneeLow           = getUniform(gl, this.program, "u_kneeLow")
+        this.uKneeHigh          = getUniform(gl, this.program, "u_kneeHigh")
+        this.uUseBinarization   = getUniform(gl, this.program, "u_useBinarization")
+        this.uBinarizationColor = getUniform(gl, this.program, "u_binarizationColor")
+
+        this.updateParams({ keyColors, kneeLow, kneeHigh, binarizationColor })
+    }
+
+    /**
+     * Re-upload color-key uniforms.  Cheap (a handful of `gl.uniform*` calls);
+     * intended to be called whenever the keying configuration changes without
+     * rebuilding the renderer, GL context, or in-flight video pipeline.
+     *
+     * @throws if `keyColors.length > {@link MAX_KEYS}`.
+     */
+    updateParams(params: ColorKeyParams): void {
+        const {
+            keyColors,
+            kneeLow = DEFAULT_KNEE_LOW,
+            kneeHigh = DEFAULT_KNEE_HIGH,
+            binarizationColor,
+        } = params
+
+        if (keyColors.length > MAX_KEYS)
+            throw new Error(`ColorKeyRenderer: at most ${MAX_KEYS} key colors supported (got ${keyColors.length})`)
+
+        const gl = this.gl
+        gl.useProgram(this.program)
+
         // Pre-linearize keys on the CPU so the shader doesn't redo sRGB→linear
-        // per-pixel for what are effectively constants.  gl.uniform3fv expects
-        // N*3 components; trailing slots stay zero-initialised but are gated
-        // by u_keyCount.
+        // per-pixel for what are effectively constants.  Trailing slots stay
+        // zero (they're gated out by u_keyCount), so we only upload the
+        // populated prefix — the previous tail is harmless.
         const flat = new Float32Array(keyColors.length * 3)
-        for (let i = 0; i < keyColors.length; i++) {
-            const [r, g, b] = keyColors[i]!
+        keyColors.forEach(([r, g, b], i) => {
             flat[i * 3 + 0] = srgbToLinear(r / 255)
             flat[i * 3 + 1] = srgbToLinear(g / 255)
             flat[i * 3 + 2] = srgbToLinear(b / 255)
-        }
+        })
 
-        gl.useProgram(this.program)
-        gl.uniform1i(gl.getUniformLocation(this.program, "u_texture"), 0)
-        gl.uniform3fv(gl.getUniformLocation(this.program, "u_keyColorsL"), flat)
-        gl.uniform1i(gl.getUniformLocation(this.program, "u_keyCount"), keyColors.length)
-        gl.uniform1f(gl.getUniformLocation(this.program, "u_kneeLow"), kneeLow)
-        gl.uniform1f(gl.getUniformLocation(this.program, "u_kneeHigh"), kneeHigh)
+        gl.uniform3fv(this.uKeyColorsL, flat)
+        gl.uniform1i(this.uKeyCount, keyColors.length)
+        gl.uniform1f(this.uKneeLow, kneeLow)
+        gl.uniform1f(this.uKneeHigh, kneeHigh)
 
-        // Gate is set unconditionally so the shader branch is well-defined when
-        // binarization is off; the color uniform only matters when the gate is
-        // non-zero, so we skip uploading it in the off case.
+        // Gate is set unconditionally so the shader branch is well-defined
+        // when binarization is off; the color uniform only matters when the
+        // gate is non-zero, so we skip uploading it in the off case.
         const useBin = binarizationColor !== undefined
-        gl.uniform1i(gl.getUniformLocation(this.program, "u_useBinarization"), useBin ? 1 : 0)
+        gl.uniform1i(this.uUseBinarization, useBin ? 1 : 0)
         if (useBin) {
             const [r, g, b] = binarizationColor
-            gl.uniform3f(
-                gl.getUniformLocation(this.program, "u_binarizationColor"),
-                r / 255, g / 255, b / 255)
+            gl.uniform3f(this.uBinarizationColor, r / 255, g / 255, b / 255)
         }
     }
 
@@ -245,6 +294,16 @@ export class ColorKeyRenderer {
 }
 
 // ── WebGL helpers ────────────────────────────────────────────────────────────
+
+/// Look up a uniform location and throw with a useful error if the shader's
+/// optimizer dropped it (e.g. the uniform isn't actually referenced in the
+/// program).  Cached results are non-null so the rest of the renderer can
+/// treat them as plain `WebGLUniformLocation`.
+function getUniform(gl: WebGL2RenderingContext, program: WebGLProgram, name: string): WebGLUniformLocation {
+    const loc = gl.getUniformLocation(program, name)
+    if (loc === null) throw new Error(`ColorKeyRenderer: uniform "${name}" not found`)
+    return loc
+}
 
 function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
     const shader = gl.createShader(type)
