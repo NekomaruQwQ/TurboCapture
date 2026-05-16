@@ -218,7 +218,7 @@ fn selector_loop(
         // info as a heartbeat so a freshly restarted server picks up our
         // state on the next tick.
         let task = match (staged.as_ref(), last_info.as_ref()) {
-            (Some((_, cached)), _) => Some(cached.to_task(true)),
+            (Some(&(_, ref cached)), _) => Some(cached.to_task(true)),
             (None, Some(cached)) => Some(cached.to_task(false)),
             (None, None) => None,
         };

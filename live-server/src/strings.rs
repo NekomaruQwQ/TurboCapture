@@ -277,7 +277,7 @@ async fn handle_subscribe_ws(mut socket: WebSocket, state: Arc<AppState>) {
 async fn send_snapshot(socket: &mut WebSocket, state: &Arc<AppState>) -> Result<(), ()> {
     let snapshot = state.strings.read().await.get_all();
     let json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_owned());
-    socket.send(Message::Text(json.into())).await.map_err(|_| ())
+    socket.send(Message::Text(json.into())).await.map_err(|_err| ())
 }
 
 /// `GET /api/strings/:key` — return a single entry.

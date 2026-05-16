@@ -76,8 +76,7 @@ async fn handle_events_ws(mut socket: WebSocket, state: Arc<AppState>) {
             // Observe client-initiated close; ignore other inbound frames.
             msg = socket.recv() => {
                 match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                     _ => {}
                 }
             }
@@ -102,6 +101,6 @@ async fn send_strings_snapshot(socket: &mut WebSocket, state: &Arc<AppState>) ->
     let text = serde_json::to_string(&json!({
         "type": "strings",
         "data": snapshot,
-    })).map_err(|_| ())?;
-    socket.send(Message::Text(text.into())).await.map_err(|_| ())
+    })).map_err(|_err| ())?;
+    socket.send(Message::Text(text.into())).await.map_err(|_err| ())
 }
