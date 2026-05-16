@@ -4,11 +4,11 @@
     import { strings } from "@/events.svelte";
     import Marquee from "@/components/Marquee.svelte";
     import Grid from "@/components/Grid.svelte";
-    import ClockWidget from "@/widgets/ClockWidget.svelte";
     import LiveModeWidget from "@/widgets/LiveModeWidget.svelte";
     import ClaudeUsageWidget from "@/widgets/ClaudeUsageWidget.svelte";
     import AboutWidget from "@/widgets/AboutWidget.svelte";
     import KpmMeter from "@/KpmMeter.svelte";
+    import ClockWidget from "@/widgets/ClockWidget.svelte";
 
     const liveMode = $derived(strings.value.$liveMode ?? "-");
     const appRendererProps: Partial<StreamRendererProps> = $derived.by(() => {
@@ -40,7 +40,10 @@
         <!-- Side Column: User Info -->
         <div class="flex! w-full h-full flex-col gap-2">
             <div class="island glow px-2 py-1.5">
-                <ClockWidget />
+                <Grid columns="1fr 1fr" gap="2">
+                    <ClockWidget timeZone="Asia/Shanghai" label="UTC+8 Beijing" />
+                    <ClockWidget timeZone="America/New_York" label="UTC-4 New York" variant="secondary" />
+                </Grid>
             </div>
             <div class="island glow px-2 py-1.5">
                 <LiveModeWidget />
