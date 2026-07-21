@@ -4,8 +4,11 @@ set shell := ["nu", "-c"]
 # List all recipes.
 list:
     just --list
+# Compile the HLSL entries declared in shaders.toml with fxc.
+compile-shaders:
+    use . *; compile-shaders
 # Run the specified component.
-run name *args:
+run name *args: compile-shaders
     use . *; run-{{name}} {{args}}
 # Run the specified `bun` command in the frontend directory.
 bun *args:
@@ -17,7 +20,7 @@ tsc *args:
 svc *args:
     cd frontend; bunx --bun svelte-check --tsconfig tsconfig.json {{args}}
 # Run the specified `cargo` command.
-cargo command *args:
+cargo command *args: compile-shaders
     cargo {{command}} --release {{args}}
 
 # == Recipes for JJ version control ==

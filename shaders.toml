@@ -1,0 +1,9 @@
+[[compile]]
+path = "live-capture/src/resample.hlsl"
+entry = "vs_main"
+stage = "vertex"
+
+[[compile]]
+path = "live-capture/src/resample.hlsl"
+entry = "ps_main"
+stage = "pixel"

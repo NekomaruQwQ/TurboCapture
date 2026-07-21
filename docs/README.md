@@ -193,6 +193,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 
 | Recipe | Description |
 |--------|-------------|
+| `just compile-shaders` | Compile the entries in `shaders.toml` to SM5.0 `.fxo` bytecode with `fxc` |
 | `just install` | Build all Rust binaries (`cargo build -r`) + install frontend deps (`bun i`) |
 | `just server` | Start the Axum server (requires `LIVE_PORT`, `LIVE_VITE_PORT`) |
 | `just capture auto` | Start the auto-selector capture pipeline |
@@ -209,6 +210,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 
 | Command | Description |
 |---------|-------------|
+| `compile-shaders` | Compile the repository-root `shaders.toml` entries with `fxc`, emitting `<source-stem>_<entry>.fxo` beside each HLSL source |
 | `get-exe <name> [--copy <id>]` | Build a binary and return its path. `--copy` creates a named copy for concurrent use. |
 | `get-url [path] [--ws]` | Build an HTTP or WS URL from `LIVE_HOST`/`LIVE_PORT` |
 | `check-env <var>` | Error if an environment variable is not set |
@@ -650,6 +652,7 @@ LiveUI/
 ├── Cargo.toml                       # Workspace root
 ├── .justfile                        # Task runner recipes (just)
 ├── mod.nu                           # Nushell orchestration module
+├── shaders.toml                      # fxc shader compilation manifest
 │
 ├── docs/
 │   ├── README.md                    # This document

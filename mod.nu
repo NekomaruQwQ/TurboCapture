@@ -23,6 +23,44 @@ const YOUTUBE_MUSIC_TITLE = "YouTube Music - Nekomaru LiveUI"
 
 # ── Utility Commands ──
 
+# Translate the repository's readable shader-stage names into Shader Model
+# 5.0 target profiles understood by fxc. Keeping this mapping here makes an
+# unsupported manifest entry fail before fxc receives an opaque target.
+def shader-profile [stage: string]: nothing -> string {
+    match $stage {
+        "vertex"   => "vs_5_0"
+        "pixel"    => "ps_5_0"
+        "geometry" => "gs_5_0"
+        "hull"     => "hs_5_0"
+        "domain"   => "ds_5_0"
+        "compute"  => "cs_5_0"
+        _ => {
+            error make -u {
+                msg: $"Unsupported shader stage '($stage)' in shaders.toml."
+            }
+        }
+    }
+}
+
+# Compile every shader entry declared in the repository-root shaders.toml.
+# Output names include the entry point because one HLSL source may contain
+# multiple stages, as resample.hlsl does.
+export def compile-shaders []: nothing -> nothing {
+    const REPO_ROOT = (path self | path dirname)
+    let manifest_path = $REPO_ROOT | path join "shaders.toml"
+    let manifest = open $manifest_path
+
+    for shader in $manifest.compile {
+        let source_path = $REPO_ROOT | path join $shader.path
+        let source = $source_path | path parse
+        let output_path = $source.parent | path join $"($source.stem)_($shader.entry).fxo"
+        let profile = shader-profile $shader.stage
+
+        print $"Compiling ($shader.path):($shader.entry) -> ($output_path)"
+        ^fxc /nologo /O3 /Zi /WX /T $profile /E $shader.entry /Fo $output_path $source_path
+    }
+}
+
 # Build the specified Rust binary, optionally copy it with a new name, and
 # return the path to the executable. This is useful for running multiple
 # instances of the same binary simultaneously without blocking new builds.

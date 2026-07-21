@@ -2,5 +2,7 @@ node_modules/
 target/
 data/
 
+*.fxo
+
 .claude
 .claude-project

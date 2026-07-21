@@ -20,10 +20,6 @@ edition = "2024"
 [workspace.dependencies.nkcore]
 path = "D:/1-Code/Core/Nekomaru-Rust/nkcore"
 
-[workspace.dependencies.ngd3dcompile]
-path = "D:/1-Code/Core/Nekomaru-Graphics-2025-stable/engine-direct3d11/ngd3dcompile_macro"
-package = "ngd3dcompile_macro"
-
 [workspace.dependencies.winrt-capture]
 path = "D:/1-Code/Core/Nekomaru-Rust/winrt-capture"
 

@@ -16,7 +16,6 @@ set-dpi-awareness = { workspace = true }
 pretty_env_logger = { workspace = true }
 serde = { workspace = true }
 log = { workspace = true }
-ngd3dcompile = { workspace = true }
 nkcore = { workspace = true, features = ["debug"] }
 pretty-name = { workspace = true }
 serde_json = { workspace = true }

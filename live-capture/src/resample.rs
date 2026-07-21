@@ -21,16 +21,8 @@ pub struct Resampler {
 }
 
 impl Resampler {
-    const BYTECODE_VS: &'static [u8] =
-        ngd3dcompile::include_bytecode!(
-            path = "resample.hlsl",
-            entry = "vs_main",
-            stage = "vertex");
-    const BYTECODE_PS: &'static [u8] =
-        ngd3dcompile::include_bytecode!(
-            path = "resample.hlsl",
-            entry = "ps_main",
-            stage = "pixel");
+    const BYTECODE_VS: &'static [u8] = include_bytes!("resample_vs_main.fxo");
+    const BYTECODE_PS: &'static [u8] = include_bytes!("resample_ps_main.fxo");
     const SAMPLER_DESC: D3D11_SAMPLER_DESC = D3D11_SAMPLER_DESC {
         Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
         AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
