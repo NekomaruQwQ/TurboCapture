@@ -210,7 +210,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 
 | Command | Description |
 |---------|-------------|
-| `compile-shaders` | Compile the repository-root `shaders.toml` entries with `fxc`, emitting `<source-stem>_<entry>.fxo` beside each HLSL source |
+| `compile-shaders` | Compile stale repository-root `shaders.toml` entries with `fxc`, emitting `<source-stem>_<entry>.fxo` beside each HLSL source |
 | `get-exe <name> [--copy <id>]` | Build a binary and return its path. `--copy` creates a named copy for concurrent use. |
 | `get-url [path] [--ws]` | Build an HTTP or WS URL from `LIVE_HOST`/`LIVE_PORT` |
 | `check-env <var>` | Error if an environment variable is not set |
@@ -225,6 +225,8 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `run-ccusage [--loop]` | Run `ccusage` once (default) or every 60s (`--loop`) and post today's Claude Code token + cost totals to the string store |
 
 #### Build Freshness & Copy Rule
+
+Each `[[compile]]` shader entry may declare `dependencies = ["common.hlsli", ...]` as exact paths relative to its HLSL source directory. The field may be omitted when the shader has no includes. `compile-shaders` invokes `fxc` only when the output is missing or older than the main HLSL source or any declared dependency; missing dependencies are reported as manifest errors.
 
 Every binary invocation goes through `get-exe`, which runs `cargo build --release --bin <name>` to ensure the binary is up-to-date.  Binaries that may run concurrently across launchers (`live-capture`, `live-ws`, `live-app`) use `get-exe --copy <id>` to copy the exe before spawning — this prevents file locking from blocking subsequent builds on Windows.
 

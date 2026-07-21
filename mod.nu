@@ -55,9 +55,37 @@ export def compile-shaders []: nothing -> nothing {
         let source = $source_path | path parse
         let output_path = $source.parent | path join $"($source.stem)_($shader.entry).fxo"
         let profile = shader-profile $shader.stage
+        # Dependency paths are explicit and source-relative so Nushell does
+        # not need to parse HLSL include directives or expand globs.
+        let dependency_paths = (
+            $shader
+            | get -o dependencies
+            | default []
+            | each { |dependency| $source.parent | path join $dependency })
+        let input_paths = $dependency_paths | prepend $source_path
+        # Validate every declared input even when the output is missing. This
+        # reports manifest typos directly instead of deferring them to fxc.
+        let input_modified_times = $input_paths | each { |input_path|
+            if not ($input_path | path exists) {
+                error make -u { msg: $"Shader input not found: ($input_path)" }
+            }
+            ls $input_path | get modified.0
+        }
+        let needs_compile = if not ($output_path | path exists) {
+            true
+        } else {
+            let output_modified = ls $output_path | get modified.0
+            $input_modified_times | any { |input_modified|
+                $input_modified > $output_modified
+            }
+        }
 
-        print $"Compiling ($shader.path):($shader.entry) -> ($output_path)"
-        ^fxc /nologo /O3 /Zi /WX /T $profile /E $shader.entry /Fo $output_path $source_path
+        if $needs_compile {
+            print $"Compiling ($shader.path):($shader.entry) -> ($output_path)"
+            ^fxc /nologo /O3 /Zi /WX /T $profile /E $shader.entry /Fo $output_path $source_path
+        } else {
+            print $"Up to date: ($shader.path):($shader.entry)"
+        }
     }
 }
 
