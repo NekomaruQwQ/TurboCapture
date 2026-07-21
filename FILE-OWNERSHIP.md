@@ -21,6 +21,7 @@ frontend/vite.config.ts                     human
 live-app/Cargo.toml                         human
 live-audio/Cargo.toml                       human
 live-protocol/Cargo.toml                    human
+live-selector/Cargo.toml                    human
 live-ws/Cargo.toml                          human
 live-capture/Cargo.toml                     human
 live-capture-youtube-music/Cargo.toml       human
@@ -54,6 +55,16 @@ src/video.rs                                agent
 
 ## live-ws/
 src/main.rs                                 agent
+
+## live-selector/
+src/main.rs                                 agent
+src/presenter.rs                            agent
+src/capture.rs                              agent
+src/d3d11.rs                                agent
+src/resample.rs                             human
+src/resample.hlsl                           human
+src/selector/mod.rs                         agent
+src/selector/config.rs                      agent
 
 ## live-capture-youtube-music/
 src/main.rs                                 agent

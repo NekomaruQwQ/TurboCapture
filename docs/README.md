@@ -2,7 +2,7 @@
 
 **Nekomaru's livestreaming infrastructure.**
 
-**Last Updated**: 2026-05-08
+**Last Updated**: 2026-07-21
 
 ---
 
@@ -111,6 +111,7 @@ graph LR
 | **`live-capture`** | Rust | GPU capture + NVENC encode | stdout (live-protocol framed) |
 | **`live-capture-youtube-music`** | Rust | YouTube Music window finder + DPI-aware crop + auto-restart wrapper around `live-capture` | stdout (live-protocol framed) |
 | **`live-audio`** | Rust | WASAPI audio capture → s16le PCM | stdout (live-protocol framed) |
+| **`live-selector`** | Rust | Local auto-selector preview | WGC → fixed-size D3D11 window |
 | **`live-ws`** | Rust | stdin → WS relay (modes: default, video, audio) | stdin → WS binary messages |
 | **`live-kpm`** | Rust | Keystroke counter | stdout (live-protocol framed) |
 | **`enumerate-windows`** | Rust | Window discovery (JSON) | stdout JSON |
@@ -128,6 +129,7 @@ graph LR
 | Keystroke counting | Rust (`live-kpm`, standalone) | `WH_KEYBOARD_LL` hook on a dedicated message pump thread. Privacy-by-design. |
 | HTTP/WS server | Rust (Axum) | Thin relay — uses `live-protocol` directly, no process management. Single toolchain. |
 | Window discovery | Rust (`enumerate-windows`) | Lightweight binary for Nushell scripts. JSON output. |
+| Local selector preview | Rust (`live-selector`) | Owns a preview-specific fork of selection, WGC, D3D11, resampling, and shader code so it can evolve independently from the encoded stream. |
 | YouTube Music capture | Rust (`live-capture-youtube-music`) | DPI-independent crop calculation from CSS constants, auto-restart on window loss. Stdout-first — piped through `live-ws` like any other producer. |
 | Orchestration | Nushell (`mod.nu`) | Launches pipelines, manages service lifecycle. |
 | Frontend | Svelte 5 + WebCodecs | Pure viewer. Receives `live-protocol` framed messages via WS. Zero H.264 knowledge. |
@@ -201,6 +203,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `just kpm` | Start the keystroke counter pipeline |
 | `just audio` | Start the audio capture pipeline |
 | `just app` | Launch the webview host |
+| `just run selector` | Preview the auto-selector locally without encoding |
 | `just youtube-music` | Launch YouTube Music in a webview |
 | `just http <method> <path>` | HTTP request helper (e.g. `just http get /api/strings`) |
 | `just push [bookmark] [revision]` | Move a jj bookmark and push to GitHub |
@@ -217,6 +220,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `patch-env <var> <default>` | Prompt to set an environment variable if missing |
 | `run-server` | Launch `live-server` (builds first via `get-exe`) |
 | `run-app` | Launch `live-app` webview (builds + copies via `get-exe`) |
+| `run-selector` | Launch the fixed-size local auto-selector preview |
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
 | `run-capture auto` | Launch the auto-selector pipeline (`live-capture \| live-ws`) |
 | `run-capture youtube-music` | Launch `live-capture-youtube-music \| live-ws` pipeline |
@@ -228,7 +232,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 
 Each `[[compile]]` shader entry may declare `dependencies = ["common.hlsli", ...]` as exact paths relative to its HLSL source directory. The field may be omitted when the shader has no includes. `compile-shaders` invokes `fxc` only when the output is missing or older than the main HLSL source or any declared dependency; missing dependencies are reported as manifest errors.
 
-Every binary invocation goes through `get-exe`, which runs `cargo build --release --bin <name>` to ensure the binary is up-to-date.  Binaries that may run concurrently across launchers (`live-capture`, `live-ws`, `live-app`) use `get-exe --copy <id>` to copy the exe before spawning — this prevents file locking from blocking subsequent builds on Windows.
+Every binary invocation goes through `get-exe`, which runs `cargo build --release --bin <name>` to ensure the binary is up-to-date.  Binaries that may run concurrently across launchers (`live-capture`, `live-selector`, `live-ws`, `live-app`) use `get-exe --copy <id>` to copy the exe before spawning — this prevents file locking from blocking subsequent builds on Windows.
 
 ---
 
@@ -337,6 +341,32 @@ live-capture --mode crop --hwnd 0x1A2B \
 # Dump to file (production code path — same output format)
 live-capture --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
 ```
+
+### live-selector CLI
+
+`live-selector` uses the same server-backed foreground matching and WGC
+capture path as `live-capture --mode auto`, but resamples the selected window
+directly into a fixed-size local D3D11 window. It performs no NV12 conversion,
+H.264 encoding, stdout framing, or network transport.
+
+```bash
+# Normally launched through the repository environment helper
+just run selector
+
+# Standalone invocation
+live-selector --config-url http://host/api/selector/config \
+  --width 1920 --height 1200 --title "Live Selector"
+```
+
+The preview excludes its own HWND from selector matching. Focusing the preview
+therefore keeps the last valid selected window instead of recursively capturing
+itself.
+
+`live-selector` intentionally does not depend on `live-capture`. The two crates
+own separate selector, WGC, D3D11, resampler, and HLSL implementations. They
+start with equivalent matching and scaling behavior, but changes to preview
+filtering or interaction do not create compatibility obligations for encoded
+stream pixels—and streaming changes cannot silently alter the preview.
 
 ### enumerate-windows CLI
 
@@ -696,6 +726,15 @@ LiveUI/
 │
 ├── live-ws/                         # stdin → WebSocket relay (Rust)
 │   └── src/main.rs                  # CLI, stdin reader, WS client, --mode video|audio caching
+│
+├── live-selector/                   # Local fixed-size auto-selector preview (Rust)
+│   └── src/
+│       ├── main.rs                  # CLI, selector integration, winit lifecycle
+│       ├── presenter.rs             # D3D11 swap chain + direct GPU presentation
+│       ├── capture.rs               # Preview-owned WGC session + viewport calculation
+│       ├── d3d11.rs                 # Preview-owned D3D11 device and view helpers
+│       ├── resample.rs + .hlsl      # Preview-owned fullscreen resampler and shader
+│       └── selector/                # Preview-owned config matching + foreground polling
 │
 ├── live-kpm/                        # Standalone keystroke counter (Rust)
 │   └── src/

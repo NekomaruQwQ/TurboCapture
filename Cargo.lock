@@ -1415,6 +1415,27 @@ name = "live-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "live-selector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "enumerate-windows",
+ "log",
+ "nkcore",
+ "pretty_env_logger",
+ "serde",
+ "serde_json",
+ "set-dpi-awareness",
+ "ureq",
+ "widestring",
+ "win32-version-info",
+ "windows 0.62.2",
+ "winit",
+ "winrt-capture",
+]
+
+[[package]]
 name = "live-server"
 version = "0.1.0"
 dependencies = [

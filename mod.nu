@@ -185,6 +185,17 @@ export def --wrapped run-youtube-music [...args]: nothing -> nothing {
 
 # ── Launcher for live-capture and live-kpm ──
 
+# Preview the auto-selector locally without encoding or network transport.
+export def --wrapped run-selector [...args]: nothing -> nothing {
+    # Resolve LIVE_HOST before starting the process so an environment prompt
+    # cannot occur after the preview window has begun initialization.
+    get-url | ignore
+
+    (^(get-exe "live-selector" --copy "selector")
+        --config-url (get-url "/api/selector/config")
+        ...$args)
+}
+
 # Start the auto-selector capture pipeline.
 # Polls the foreground window, matches patterns from the server config,
 # hot-swaps the capture session, and relays encoded frames via WebSocket.

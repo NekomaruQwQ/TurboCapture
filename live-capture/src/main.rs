@@ -24,19 +24,16 @@
 //! live-capture --foreground-window
 //! ```
 
-mod d3d11;
-mod capture;
-mod converter;
-mod encoder;
-mod resample;
-mod selector;
-
-use capture::{CaptureSession, CropBox};
-use converter::NV12Converter;
-use encoder::{H264Encoder, H264EncoderConfig};
-use resample::Resampler;
-
-use live_capture::{NALUnit, NALUnitType};
+use live_capture::{
+    NALUnit,
+    NALUnitType,
+    capture::{self, CaptureSession, CropBox},
+    converter::NV12Converter,
+    d3d11,
+    encoder::{H264Encoder, H264EncoderConfig},
+    resample::Resampler,
+    selector,
+};
 use live_protocol::{MessageType, flags, write_message};
 use live_protocol::avcc::serialize_avcc_payload;
 use live_protocol::video::{CodecParams, write_codec_params_payload, write_frame_payload};
@@ -469,6 +466,7 @@ fn run(hwnd: isize, mode: CaptureMode, frame_rate: u32, clear_color: [f32; 4]) -
 /// Run in auto mode: the selector thread polls the foreground window and sends
 /// swap commands.  The capture loop replaces the `CaptureSession` on each swap
 /// while the encoder keeps running on the same staging texture.
+#[expect(clippy::too_many_lines, reason = "hot-swap capture setup and loop are kept together for lifecycle clarity")]
 fn run_auto(
     width: u32,
     height: u32,

@@ -2,10 +2,10 @@
 //!
 //! Runs on a dedicated thread, polls the foreground window every 2 seconds,
 //! matches against patterns from the server config, and sends swap commands
-//! to the capture loop via a channel.  Stream-info POSTs are dispatched to
-//! a small worker thread (`spawn_info_poster`) so server stalls never freeze
-//! the polling loop; the worker also re-posts the cached info every tick
-//! (heartbeat) so computed strings stay fresh after a server restart.
+//! to the capture loop via a channel. Stream-info POSTs are dispatched to a
+//! small worker thread (`spawn_info_poster`) so server stalls never freeze the
+//! polling loop; the worker also re-posts the cached info every tick (heartbeat)
+//! so computed strings stay fresh after a server restart.
 //!
 //! ## Ordering invariant (best-effort)
 //!
@@ -78,8 +78,9 @@ impl CachedStreamInfo {
     }
 }
 
-/// Spawn the selector polling thread.  Returns the receiving end of the
-/// swap command channel.
+/// Spawn the selector polling thread. Returns the receiving end of the swap
+/// command channel. The thread exits after the receiver is dropped and its
+/// next attempted selection send fails.
 pub fn spawn_selector(config: SelectorConfig) -> mpsc::Receiver<SwapCommand> {
     let (tx, rx) = mpsc::channel();
     let post_tx = spawn_info_poster(config.info_url.clone());
@@ -134,9 +135,8 @@ fn spawn_info_poster(url: String) -> mpsc::Sender<PostTask> {
     tx
 }
 
-/// Main selector loop.  Polls the foreground window, matches patterns,
-/// sends swap commands to the capture loop, and queues capture-info
-/// POSTs to the poster worker every tick.
+/// Main selector loop. Polls the foreground window, matches patterns, sends
+/// swap commands to the capture loop, and queues capture-info POSTs.
 fn selector_loop(
     tx: &mpsc::Sender<SwapCommand>,
     post_tx: &mpsc::Sender<PostTask>,
@@ -213,10 +213,9 @@ fn selector_loop(
             // capture is still running on the previously matched window.
         }
 
-        // Single POST per tick.  Swap ticks queue a swap-tagged task (the
-        // worker won't coalesce it).  Otherwise we re-queue the cached
-        // info as a heartbeat so a freshly restarted server picks up our
-        // state on the next tick.
+        // Single POST per tick. Swap ticks queue a swap-tagged task (the worker
+        // won't coalesce it). Otherwise re-queue the cached info as a heartbeat
+        // so a restarted server sees it on the next tick.
         let task = match (staged.as_ref(), last_info.as_ref()) {
             (Some(&(_, ref cached)), _) => Some(cached.to_task(true)),
             (None, Some(cached)) => Some(cached.to_task(false)),

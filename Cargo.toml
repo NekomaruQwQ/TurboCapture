@@ -7,6 +7,7 @@ members = [
     "live-capture-youtube-music",
     "live-kpm",
     "live-protocol",
+    "live-selector",
     "live-server",
     "live-ws",
     "crates/enumerate-windows",
