@@ -18,17 +18,14 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies.nkcore]
-git = "git://nekomaru-ubuntu/Nekomaru-Rust.git"
-branch = "main"
+path = "D:/1-Code/Core/Nekomaru-Rust/nkcore"
 
 [workspace.dependencies.ngd3dcompile]
-git = "git://nekomaru-ubuntu/Nekomaru-Graphics-2025.git"
-rev = "bac5bb90"
+path = "D:/1-Code/Core/Nekomaru-Graphics-2025-stable/engine-direct3d11/ngd3dcompile_macro"
 package = "ngd3dcompile_macro"
 
 [workspace.dependencies.winrt-capture]
-git = "git://nekomaru-ubuntu/Nekomaru-Rust.git"
-branch = "main"
+path = "D:/1-Code/Core/Nekomaru-Rust/winrt-capture"
 
 [workspace.dependencies]
 live-protocol = { path = "live-protocol" }
@@ -36,23 +33,23 @@ live-protocol = { path = "live-protocol" }
 enumerate-windows = { path = "crates/enumerate-windows" }
 set-dpi-awareness = { path = "crates/set-dpi-awareness" }
 
-anyhow = "1"
-axum = { version = "0.8", features = ["ws"] }
+anyhow = "1.0"
+axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.22.1"
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.3", features = ["derive"] }
 crossbeam = "0.8"
-env_logger = "0.11.10"
+env_logger = "0.11.11"
 euclid = "0.22.14"
 flate2 = "1"
-futures-util = "0.3"
-log = "0.4.29"
+futures-util = "0.3.33"
+log = "0.4.33"
 pretty_env_logger = "0.5.0"
 pretty-name = "0.4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tap = "1.0.1"
-tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.29.0", features = ["connect"] }
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-tungstenite = { version = "0.30.0", features = ["connect"] }
 ureq = "3"
 widestring = "1.2.1"
 win32-version-info = "0.3.0"
@@ -62,7 +59,7 @@ win32job = "2.0.3"
 windows = { version = "0.62.2", features = ["Win32_Foundation"] }
 
 [workspace.dependencies.reqwest]
-version = "0.13.2"
+version = "0.13.4"
 default-features = false
 features = ["stream"]
 
@@ -72,7 +69,7 @@ default-features = false
 features = ["rwh_06"]
 
 [workspace.dependencies.wry]
-version = "0.55.0"
+version = "0.55.1"
 default-features = false
 features = ["devtools", "protocol"]
 
@@ -82,7 +79,7 @@ nursery     = { level = "warn", priority = -1 }
 pedantic    = { level = "warn", priority = -1 }
 restriction = { level = "warn", priority = -1 }
 
-# #I-language cargo
+# I-language cargo
 cargo_common_metadata = "allow"
 multiple_crate_versions = "allow" # can be fixed using `allowed-duplicate-crates`
 
@@ -100,6 +97,8 @@ exhaustive_structs = "allow"
 expect_used = "allow"
 implicit_return = "allow"
 indexing_slicing = "allow"
+inline_modules = "allow"
+inline_trait_bounds = "allow"
 let_underscore_must_use = "allow" # allows ignoring results of functions marked `#[must_use]`
 let_underscore_untyped = "allow"
 little_endian_bytes = "allow" # allows using `to_le_bytes` and `from_le_bytes`
@@ -143,27 +142,28 @@ modulo_arithmetic = "allow"
 needless_borrowed_reference = "allow" # or: `clippy::pattern_type_mismatch`
 
 # III-conflicting-lints #style
-needless_else = "allow" # or: `clippy::else_if_without_else`
+needless_else = "allow"               # or: `clippy::else_if_without_else`
 
 # III-conflicting-lints #restriction
-pub_with_shorthand = "allow"  # xor: `clippy::pub_without_shorthand`
-semicolon_outside_block = "allow"  # xor: `clippy::semicolon_inside_block`
+pub_with_shorthand = "allow"          # xor: `clippy::pub_without_shorthand`
+semicolon_outside_block = "allow"     # xor: `clippy::semicolon_inside_block`
 unseparated_literal_suffix = "allow"  # xor: `clippy::separated_literal_suffix`
 
 # IV-code-style #style
 doc_overindented_list_items = "allow" # allows using 4 spaces for indenting docs
-manual_range_contains = "allow" # makes graphics code less noisy
-match_ref_pats = "allow" # just looks cool XD
+manual_range_contains = "allow"       # makes code less noisy
+match_ref_pats = "allow"              # just looks cool XD
 
 # IV-code-style #nursery
-option_if_let_else = "allow" # makes code more readable in many cases
-suboptimal_flops = "allow" # makes graphics code less noisy
+option_if_let_else = "allow"          # helps readability in some cases
+suboptimal_flops = "allow"            # makes code less noisy
 
 # IV-code-style #pedantic
-if_not_else = "allow" # helps clarity in many cases
+if_not_else = "allow"                 # helps readability in many cases
+map_unwrap_or = "allow"               # helps readability in some cases
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-module_name_repetitions = "allow" # e.g.: `winit::window::WindowBuilder`
+module_name_repetitions = "allow"     # e.g.: `winit::window::WindowBuilder`
 must_use_candidate = "allow"
 wildcard_imports = "allow"
 
@@ -174,4 +174,3 @@ impl_trait_in_params = "allow"
 min_ident_chars = "allow"
 mod_module_files = "allow"
 multiple_inherent_impl = "allow"
-try_err ="allow"
