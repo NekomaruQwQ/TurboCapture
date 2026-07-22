@@ -23,6 +23,7 @@ use live_shared_texture::{
     InheritedHandle,
     OpenedMailbox,
     PRODUCER_KEY,
+    ResourceGenerationLost,
 };
 
 use nkcore::prelude::*;
@@ -164,7 +165,8 @@ impl SharedBgraInput {
                     "capture worker did not publish the first shared frame within {FIRST_FRAME_TIMEOUT_MS} ms");
             }
             AcquireStatus::Abandoned => {
-                anyhow::bail!("shared texture keyed mutex was abandoned by the capture worker");
+                return Err(ResourceGenerationLost::new(
+                    "shared texture keyed mutex was abandoned by the capture worker").into());
             }
             AcquireStatus::Acquired => {}
         }

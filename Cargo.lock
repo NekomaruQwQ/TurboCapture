@@ -1427,6 +1427,7 @@ dependencies = [
  "nkcore",
  "pretty_env_logger",
  "serde",
+ "serde_json",
  "set-dpi-awareness",
  "toml",
  "widestring",
@@ -1465,6 +1466,22 @@ dependencies = [
  "log",
  "pretty_env_logger",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "live-stream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "euclid",
+ "live-shared-texture",
+ "log",
+ "pretty_env_logger",
+ "serde",
+ "serde_json",
+ "ureq",
+ "win32job",
 ]
 
 [[package]]

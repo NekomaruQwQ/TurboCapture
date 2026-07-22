@@ -27,6 +27,7 @@ live-encoder/Cargo.toml                     human
 live-capture-youtube-music/Cargo.toml       human
 live-kpm/Cargo.toml                         human
 live-server/Cargo.toml                      human
+live-stream/Cargo.toml                      human
 crates/live-shared-texture/Cargo.toml       human
 crates/enumerate-windows/Cargo.toml         human
 crates/set-dpi-awareness/Cargo.toml         human
@@ -57,6 +58,11 @@ src/video.rs                                agent
 
 ## live-ws/
 src/main.rs                                 agent
+
+## live-stream/
+src/main.rs                                 agent
+src/metadata.rs                             agent
+src/restart.rs                              agent
 
 ## live-selector/
 src/main.rs                                 agent

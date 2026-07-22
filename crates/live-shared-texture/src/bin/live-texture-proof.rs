@@ -69,16 +69,18 @@ fn run(args: &Args) -> anyhow::Result<()> {
         "width and height must be multiples of 16 (got {}x{})",
         args.width,
         args.height);
-    let mailbox = OwnedMailbox::new(Size2D::new(args.width, args.height))
+    let mut mailbox = OwnedMailbox::new(Size2D::new(args.width, args.height))
         .context("failed to create shared-texture resource generation")?;
-    let handle = mailbox.inherited_handle_value();
     let adapter = mailbox.device_bundle().adapter_luid;
+    let adapter_name = mailbox.device_bundle().adapter_name.clone();
+    let inheritance = mailbox.inheritable_handle()?;
+    let handle = inheritance.value();
     log::info!(
         "shared-texture proof: {}x{}, adapter={} ({}), inherited handle=0x{handle:X}",
         args.width,
         args.height,
         adapter,
-        mailbox.device_bundle().adapter_name);
+        adapter_name);
 
     let selector = Command::new(&args.selector)
         .arg("--config").arg(&args.config)
@@ -116,10 +118,9 @@ fn run(args: &Args) -> anyhow::Result<()> {
         }
     };
 
-    // The standard Windows process launcher inherits inheritable handles by
-    // default. Revoke the flag immediately after the only intended children
-    // are created so later descendants cannot receive the mailbox accidentally.
-    mailbox.disable_handle_inheritance()?;
+    // The guard revokes inheritance before any later descendant can receive
+    // the mailbox. Existing child copies remain valid until those workers exit.
+    inheritance.revoke()?;
     let mut children = ProofChildren { selector, encoder };
     let deadline = args.duration_seconds
         .map(|seconds| Instant::now() + Duration::from_secs(seconds));

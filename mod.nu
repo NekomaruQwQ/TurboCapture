@@ -239,6 +239,30 @@ export def --wrapped "run-capture shared" [--config: path, ...args]: nothing -> 
         --server $server_url)
 }
 
+# Start the Phase 4 process supervisor. Unlike the Phase 3 proof launcher,
+# live-stream owns the encoder-to-relay pipe, resource-generation recovery,
+# Job Object containment, and metadata posting. Selector policy remains a local
+# TOML carried with this invocation and interpreted only by live-selector.
+export def --wrapped "run-capture stream" [--config: path, ...args]: nothing -> nothing {
+    get-url | ignore
+    let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
+    let selector_path = get-exe "live-selector" --copy "stream"
+    let encoder_path = get-exe "live-encoder" --copy "stream"
+    let relay_path = get-exe "live-ws" --copy "stream"
+    let supervisor_path = get-exe "live-stream" --copy "stream"
+
+    (^$supervisor_path
+        --mode shared
+        --selector $selector_path
+        --encoder $encoder_path
+        --relay $relay_path
+        --config $config_path
+        --stream-id main
+        --server (get-url --ws "/internal/streams/main")
+        --info-url (get-url "/internal/streams/main/info")
+        ...$args)
+}
+
 # Start the YouTube Music crop capture pipeline.
 #
 # Uses `live-capture-youtube-music` which handles window discovery, DPI-aware

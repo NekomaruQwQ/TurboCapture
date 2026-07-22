@@ -126,10 +126,11 @@ graph LR
 |-----------|----------|------|-----|
 | **`live-protocol`** | Rust (lib) | Shared 8-byte frame header + AVCC helpers + audio payloads | Used by all Rust crates |
 | **`live-shared-texture`** | Rust (internal lib + proof bin) | Explicit-adapter NT handle, keyed-mutex mailbox, and temporary Phase 3 owner | inherited handle → shared BGRA texture |
+| **`live-stream`** | Rust | Phase 4 adapter/resource owner, Job-contained process supervisor, metadata poster, and restart policy | local TOML + worker paths → managed video stream |
 | **`live-encoder`** | Rust | Transitional legacy capture CLI plus shared/private BGRA → NV12 → H.264 → stdout pipeline | BGRA texture → live-protocol framed stdout |
 | **`live-capture-youtube-music`** | Rust | YouTube Music window finder + DPI-aware crop + auto-restart wrapper around legacy `live-encoder --mode crop` | stdout (live-protocol framed) |
 | **`live-audio`** | Rust | WASAPI audio capture → s16le PCM | stdout (live-protocol framed) |
-| **`live-selector`** | Rust | Local profile-driven safe-capture preview with optional managed publication | TOML policy + WGC → preview and/or shared BGRA texture |
+| **`live-selector`** | Rust | Local profile-driven safe-capture preview with optional managed publication | TOML + WGC → preview/shared BGRA + JSONL selection events |
 | **`live-ws`** | Rust | stdin → WS relay (modes: default, video, audio) | stdin → WS binary messages |
 | **`live-kpm`** | Rust | Keystroke counter | stdout (live-protocol framed) |
 | **`enumerate-windows`** | Rust | Window discovery (JSON) | stdout JSON |
@@ -156,9 +157,10 @@ The target architecture gives the current responsibilities clearer names:
   `live-capture`. It reads a fixed-size shared GPU texture, converts BGRA to NV12,
   encodes H.264, and writes `live-protocol` messages to stdout. It does not know
   about HWNDs, selector profiles, or capture modes.
-- **`live-stream`** — a new supervisor for a complete video stream. It owns
-  stream modes, DXGI adapter selection, shared-texture creation, configuration
-  synchronization, child lifetimes, and the `live-encoder | live-ws` pipe.
+- **`live-stream`** — the Phase 4 supervisor for a complete video stream. It
+  carries one local selector TOML path, owns stream modes, DXGI adapter and
+  shared-texture creation, child lifetimes, computed metadata, restart policy,
+  and the `live-encoder | live-ws` pipe. It never parses selector policy or media.
 - **`live-ws`** — remains the transport worker and owns WebSocket reconnection.
 
 ```mermaid
@@ -286,6 +288,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `just server` | Start the Axum server (requires `LIVE_PORT`, `LIVE_VITE_PORT`) |
 | `just capture auto` | Start the auto-selector capture pipeline |
 | `just run capture shared` | Start the temporary Phase 3 shared-texture proof pipeline |
+| `just run capture stream` | Start the Phase 4 `live-stream` supervised pipeline |
 | `just capture youtube-music` | Start the YouTube Music crop capture pipeline |
 | `just kpm` | Start the keystroke counter pipeline |
 | `just audio` | Start the audio capture pipeline |
@@ -311,6 +314,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
 | `run-capture auto` | Launch the transitional auto-selector pipeline (`live-encoder \| live-ws`) |
 | `run-capture shared [--config path]` | Launch `live-texture-proof` with managed selector/encoder workers and pipe encoder stdout to `live-ws` |
+| `run-capture stream [--config path]` | Launch `live-stream` with a local TOML, Job-contained workers, restart policy, and direct encoder-to-relay pipe |
 | `run-capture youtube-music` | Launch `live-capture-youtube-music \| live-ws` pipeline |
 | `run-audio [device]` | Launch the audio pipeline (`live-audio \| live-ws --mode audio`) |
 | `run-kpm` | Launch the KPM pipeline (`live-kpm \| live-ws`) |
@@ -320,7 +324,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 
 Each `[[compile]]` shader entry may declare `dependencies = ["common.hlsli", ...]` as exact paths relative to its HLSL source directory. The field may be omitted when the shader has no includes. `compile-shaders` invokes `fxc` only when the output is missing or older than the main HLSL source or any declared dependency; missing dependencies are reported as manifest errors.
 
-Every binary invocation goes through `get-exe`, which runs `cargo build --release --bin <name>` to ensure the binary is up-to-date.  Binaries that may run concurrently across launchers (`live-encoder`, `live-selector`, `live-ws`, `live-app`) use `get-exe --copy <id>` to copy the exe before spawning — this prevents file locking from blocking subsequent builds on Windows.
+Every binary invocation goes through `get-exe`, which runs `cargo build --release --bin <name>` to ensure the binary is up-to-date.  Binaries that may run concurrently across launchers (`live-stream`, `live-encoder`, `live-selector`, `live-ws`, `live-app`) use `get-exe --copy <id>` to copy the exe before spawning — this prevents file locking from blocking subsequent builds on Windows.
 
 ---
 
@@ -440,6 +444,33 @@ live-encoder --mode shared --width 1920 --height 1200 \
 live-encoder --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
 ```
 
+### live-stream CLI
+
+`live-stream` owns the Phase 4 managed topology. It selects the high-performance
+DXGI adapter, creates one shared-texture generation, restricts handle inheritance
+to the two GPU workers, connects encoder stdout directly to relay stdin, and
+contains every descendant in a kill-on-close Windows Job Object. Ordinary
+selector exit restarts only the selector; encoder or relay exit recreates that
+pipe pair; keyed-mutex abandonment or DXGI device loss replaces the complete GPU
+generation. Every restart class uses capped exponential backoff with a finite
+consecutive-attempt budget.
+
+The selector TOML always remains local to the streaming machine. `live-stream`
+passes its path unchanged and never fetches, copies, or parses policy. The server
+may run remotely without becoming a configuration authority.
+
+```bash
+# Repository launcher (preferred during migration)
+just run capture stream --config data/selector-new.toml
+
+# Direct invocation; worker executables are normally resolved by mod.nu
+live-stream --mode shared \
+  --selector live-selector.exe --encoder live-encoder.exe --relay live-ws.exe \
+  --config data/selector-new.toml --stream-id main \
+  --server ws://host/internal/streams/main \
+  --info-url http://host/internal/streams/main/info
+```
+
 ### live-selector CLI
 
 `live-selector` loads enabled named profiles from a local TOML file, matches
@@ -447,10 +478,22 @@ foreground executable paths against their unioned includes and global exclusion
 vetoes, and resamples the selected window directly into a fixed-size local D3D11
 window. Invalid initial configuration fails closed; invalid reloads retain the
 last fully validated policy. It performs no NV12 conversion, H.264 encoding,
-stdout framing, or network transport. When the temporary proof owner supplies an
-adapter LUID and inherited handle, it also publishes resampled BGRA frames with a
+stdout media framing, or network transport. When `live-texture-proof` or
+`live-stream` supplies an adapter LUID and inherited handle, it also publishes
+resampled BGRA frames with a
 zero-timeout producer acquisition; a busy encoder drops only that publication
 and never stalls capture or local presentation.
+
+Every invocation emits line-delimited JSON selection transitions on stdout.
+This is a standalone debugging surface and the managed metadata contract; it is
+not media framing. Redirect it to the platform null device when it is unwanted.
+Overlapping enabled profiles use the first matching name in TOML order as their
+deterministic metadata label, while exclusions still veto the complete union.
+
+```json
+{"event":"selected","hwnd":"0x1234","title":"Editor","file_description":"Visual Studio Code","profile":"code"}
+{"event":"cleared"}
+```
 
 ```bash
 # Normally launched through the repository environment helper
@@ -459,6 +502,9 @@ just run selector
 # Standalone invocation
 live-selector --config data/selector-new.toml \
   --width 1920 --height 1200 --title "Live Selector"
+
+# Preview without retaining JSONL diagnostics
+live-selector --config data/selector-new.toml > /dev/null
 
 # Managed-output plumbing is supervisor-only
 live-selector --config data/selector-new.toml --width 1920 --height 1200 \
@@ -550,8 +596,8 @@ Server-managed key-value store. Keys prefixed with `$` are **computed strings** 
 | Key | Source | Description |
 |-----|--------|-------------|
 | `$captureInfo` | `POST /internal/streams/:id/info` | Human-readable label for the captured window |
-| `$captureMode` | `POST /internal/streams/:id/info` | Current capture mode (e.g. `"auto"`) |
-| `$liveMode` | `POST /internal/streams/:id/info` | Mode tag from matched pattern (e.g. `"code"`, `"game"`) |
+| `$captureMode` | `POST /internal/streams/:id/info` | Current topology (e.g. `"auto"`, `"shared"`) |
+| `$liveMode` | `POST /internal/streams/:id/info` | Matched legacy tag or first matching enabled TOML profile (e.g. `"code"`, `"game"`) |
 | `$microphone` | Audio encoder connect/disconnect | Audio stream status (present when `live-audio` encoder is connected, absent otherwise) |
 | `$timestamp` | Server startup | Revision timestamp via `jj log` |
 | `$claudeTokens` | `run-ccusage` poller | Today's total Claude Code token count (raw integer; frontend formats to millions) |
@@ -653,6 +699,10 @@ managed input mode via `--mode`:
   and stdout framing.
 
 All modes output to stdout via `live-protocol` framing. Pipe through `live-ws` for network delivery.
+
+`live-stream --mode shared` is a supervisor topology rather than another encoder
+input mode: it composes the selector, encoder `shared` mode, relay, local TOML,
+resource generation, metadata, and restart policy.
 
 ### Selector Pattern Format
 
@@ -820,8 +870,14 @@ LiveUI/
 │
 ├── crates/live-shared-texture/      # Phase 3 D3D11 mailbox contract + proof owner
 │   └── src/
-│       ├── lib.rs                   # Adapter LUID, NT handle, descriptor + mutex contract
+│       ├── lib.rs                   # Adapter, scoped NT handle, descriptor, mutex + loss contract
 │       └── bin/live-texture-proof.rs # Temporary owner/worker launcher
+│
+├── live-stream/                     # Phase 4 managed video supervisor (Rust)
+│   └── src/
+│       ├── main.rs                  # Job containment, resource generations, child/pipe ownership
+│       ├── metadata.rs              # Selector JSONL reader + bounded-time HTTP poster
+│       └── restart.rs               # Pure restart boundaries + bounded exponential policy
 │
 ├── live-encoder/                    # Transitional capture CLI + extracted encoder (Rust)
 │   └── src/
@@ -853,11 +909,11 @@ LiveUI/
 │   └── src/
 │       ├── main.rs                  # CLI, selector integration, winit lifecycle
 │       ├── presenter.rs             # D3D11 swap chain + direct GPU presentation
-│       ├── publisher.rs             # Zero-timeout shared-texture publication + metrics
+│       ├── publisher.rs             # Zero-timeout publication, metrics + abandonment proof hook
 │       ├── capture.rs               # Preview-owned WGC session + viewport calculation
 │       ├── d3d11.rs                 # Preview-owned D3D11 device and view helpers
 │       ├── resample.rs + .hlsl      # Preview-owned fullscreen resampler and shader
-│       └── selector/                # TOML policy reload + safe foreground matching
+│       └── selector/                # TOML policy reload, matching + JSONL selection events
 │
 ├── live-kpm/                        # Standalone keystroke counter (Rust)
 │   └── src/
@@ -875,7 +931,7 @@ LiveUI/
 │       ├── kpm.rs                   # KPM input WS + legacy /api/kpm viewer (superseded by events_ws)
 │       ├── strings.rs               # String store (file-backed + computed) + legacy /api/strings/ws (superseded by events_ws)
 │       ├── selector.rs              # Selector config storage + routes
-│       ├── events.rs                # Stream info endpoint (periodic capture metadata)
+│       ├── events.rs                # Backward-compatible stream lifecycle/selection metadata
 │       ├── events_ws.rs             # Unified /api/events WS — multiplexes KPM + strings
 │       └── vite_proxy.rs            # Reverse proxy to Vite dev server
 │
@@ -962,6 +1018,28 @@ The same hardware proof also disabled winit drag/drop for `live-selector`:
 winit otherwise calls STA-oriented `OleInitialize`, which conflicts with the
 MTA already selected for Windows Graphics Capture. The preview has no file-drop
 behavior, so disabling that unused integration is the narrow fix.
+
+### Bug #6: Worker Exit Did Not Identify the Safe Restart Boundary
+
+**Problem**: a selector or encoder process exit alone cannot say whether only
+that worker failed or the shared keyed-mutex surface became invalid. Restarting
+one worker after mutex abandonment repeatedly reopened an untrustworthy resource;
+restarting every process for ordinary errors discarded healthy GPU and network
+state.
+
+**Fix**: keyed-mutex abandonment and DXGI device-loss errors now become a typed
+resource-generation failure inside the worker and stable process exit code 20 at
+the supervisor boundary. `live-stream` maps ordinary selector, encoder/relay,
+and resource-loss exits to three separately tested restart scopes. A scoped
+inheritance guard permits each restarted GPU worker to receive the mailbox while
+ensuring the relay cannot inherit it.
+
+The hardware fault hook exited `live-selector` while producer key 0 was owned.
+`live-encoder` observed raw `WAIT_ABANDONED`, exited with code 20, and
+`live-stream` replaced generation 1 with a healthy generation 2. Independent
+relay and encoder termination replaced only their pipe pair and preserved the
+selector PID. Force-terminating the supervisor closed its Job Object and removed
+all three exact managed child PIDs.
 
 ---
 

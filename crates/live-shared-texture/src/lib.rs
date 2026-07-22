@@ -16,7 +16,7 @@ use std::{
 use anyhow::Context as _;
 use euclid::default::Size2D;
 use windows::{
-    core::{Interface as _, PCWSTR},
+    core::{HRESULT, Interface as _, PCWSTR},
     Win32::{
         Foundation::{
             CloseHandle,
@@ -53,6 +53,12 @@ use windows::{
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
                 CreateDXGIFactory1,
+                DXGI_ERROR_ACCESS_LOST,
+                DXGI_ERROR_DEVICE_HUNG,
+                DXGI_ERROR_DEVICE_REMOVED,
+                DXGI_ERROR_DEVICE_RESET,
+                DXGI_ERROR_DRIVER_INTERNAL_ERROR,
+                DXGI_ERROR_NOT_FOUND,
                 DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
                 DXGI_SHARED_RESOURCE_READ,
                 DXGI_SHARED_RESOURCE_WRITE,
@@ -70,6 +76,56 @@ use windows::{
 pub const PRODUCER_KEY: u64 = 0;
 /// Mutex key granting the encoder worker permission to consume a frame.
 pub const CONSUMER_KEY: u64 = 1;
+/// Stable worker exit code requesting complete shared-resource recreation.
+pub const RESOURCE_GENERATION_LOST_EXIT_CODE: i32 = 20;
+
+/// Fatal condition proving the current shared-resource generation is unusable.
+///
+/// Workers wrap keyed-mutex abandonment and irrecoverable mailbox failures in
+/// this type. The supervisor consumes only the stable process exit code; the
+/// Rust type keeps in-process error classification independent from messages.
+#[derive(Debug)]
+pub struct ResourceGenerationLost {
+    /// Human-readable cause retained for the worker's stderr diagnostics.
+    reason: String,
+}
+
+impl ResourceGenerationLost {
+    /// Classify one failure as requiring a new mailbox and GPU-worker cohort.
+    pub fn new(reason: impl Into<String>) -> Self { Self { reason: reason.into() } }
+}
+
+impl fmt::Display for ResourceGenerationLost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for ResourceGenerationLost {}
+
+/// Decide whether a worker error invalidates the complete resource generation.
+///
+/// Explicit mailbox failures use [`ResourceGenerationLost`]. DXGI device-loss
+/// HRESULTs are also recognized through an `anyhow` context chain so callers do
+/// not need to discard useful API-specific context merely to classify failure.
+pub fn is_resource_generation_lost(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<ResourceGenerationLost>().is_some() ||
+            cause
+                .downcast_ref::<windows::core::Error>()
+                .is_some_and(|error| is_device_loss_hresult(error.code()))
+    })
+}
+
+/// Identify the DXGI statuses that require adapter/resource reselection.
+const fn is_device_loss_hresult(status: HRESULT) -> bool {
+    status.0 == DXGI_ERROR_ACCESS_LOST.0 ||
+        status.0 == DXGI_ERROR_DEVICE_HUNG.0 ||
+        status.0 == DXGI_ERROR_DEVICE_REMOVED.0 ||
+        status.0 == DXGI_ERROR_DEVICE_RESET.0 ||
+        status.0 == DXGI_ERROR_DRIVER_INTERNAL_ERROR.0 ||
+        status.0 == DXGI_ERROR_NOT_FOUND.0
+}
 
 /// Stable command-line representation of a DXGI adapter LUID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -266,7 +322,7 @@ fn create_device(
     })
 }
 
-/// Supervisor-owned shared BGRA mailbox and inheritable NT handle.
+/// Supervisor-owned shared BGRA mailbox and scoped-inheritance NT handle.
 pub struct OwnedMailbox {
     /// Device cohort retaining the selected adapter and immediate context.
     device_bundle: DeviceBundle,
@@ -276,7 +332,7 @@ pub struct OwnedMailbox {
     _mutex: SharedKeyedMutex,
     /// Fixed dimensions validated independently by each worker.
     _size: Size2D<u32>,
-    /// Inheritable resource handle retained until both children are started.
+    /// Resource handle made inheritable only around intended worker spawns.
     handle: OwnedHandle,
 }
 
@@ -302,7 +358,9 @@ impl OwnedMailbox {
         let security = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: core::ptr::null_mut(),
-            bInheritHandle: true.into(),
+            // The supervisor enables inheritance through an RAII guard only
+            // while it synchronously launches an intended GPU worker.
+            bInheritHandle: false.into(),
         };
         let access = DXGI_SHARED_RESOURCE_READ.0 | DXGI_SHARED_RESOURCE_WRITE.0;
         // SAFETY: `security` remains alive during the call. A null name keeps
@@ -326,26 +384,67 @@ impl OwnedMailbox {
         })
     }
 
-    /// Numeric handle value inherited unchanged by directly spawned children.
-    pub fn inherited_handle_value(&self) -> usize { self.handle.0.0 as usize }
-
     /// Selected adapter and device retained by this resource generation.
     pub const fn device_bundle(&self) -> &DeviceBundle { &self.device_bundle }
 
-    /// Prevent later child processes from inheriting this resource generation.
+    /// Temporarily permit one or more synchronous intended worker spawns.
     ///
-    /// The proof supervisor calls this immediately after starting the intended
-    /// selector and encoder workers. Existing child copies and the owning parent
-    /// handle remain valid.
-    pub fn disable_handle_inheritance(&self) -> anyhow::Result<()> {
-        // SAFETY: `self.handle` remains live; masking the inherit flag does not
-        // close the handle or change its resource access rights.
-        unsafe { SetHandleInformation(
-            self.handle.0,
-            HANDLE_FLAG_INHERIT.0,
-            HANDLE_FLAGS::default()) }
-            .context("failed to disable shared-handle inheritance")
+    /// The mutable borrow prevents overlapping guards. Dropping the returned
+    /// guard revokes inheritance on success, error, or unwind while preserving
+    /// the parent handle and copies already inherited by children.
+    pub fn inheritable_handle(&mut self) -> anyhow::Result<InheritableHandleGuard<'_>> {
+        set_handle_inheritance(&self.handle, true)?;
+        Ok(InheritableHandleGuard {
+            handle: &mut self.handle,
+            inheritable: true,
+        })
     }
+}
+
+/// Scoped permission for directly spawned children to inherit the mailbox.
+pub struct InheritableHandleGuard<'a> {
+    /// Mutably borrowed owner prevents another simultaneous inheritance scope.
+    handle: &'a mut OwnedHandle,
+    /// Whether `Drop` still needs to perform best-effort revocation.
+    inheritable: bool,
+}
+
+impl InheritableHandleGuard<'_> {
+    /// Numeric handle value passed unchanged through the child command line.
+    pub fn value(&self) -> usize { self.handle.0.0 as usize }
+
+    /// Revoke inheritance explicitly before launching any unrelated child.
+    ///
+    /// Consuming the guard prevents further intended spawns in this scope. A
+    /// failure remains visible to the supervisor instead of relying only on the
+    /// best-effort `Drop` path.
+    pub fn revoke(mut self) -> anyhow::Result<()> {
+        set_handle_inheritance(self.handle, false)?;
+        self.inheritable = false;
+        Ok(())
+    }
+}
+
+impl Drop for InheritableHandleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.inheritable {
+            return;
+        }
+        // This is best-effort in `Drop`; the successful enabling call proves the
+        // handle is valid, and the owning handle remains private if no spawn ran.
+        if let Err(error) = set_handle_inheritance(self.handle, false) {
+            log::error!("failed to revoke shared-handle inheritance: {error:#}");
+        }
+    }
+}
+
+/// Toggle only the Win32 inheritance flag without changing ownership or access.
+fn set_handle_inheritance(handle: &OwnedHandle, inheritable: bool) -> anyhow::Result<()> {
+    let flags = if inheritable { HANDLE_FLAG_INHERIT } else { HANDLE_FLAGS::default() };
+    // SAFETY: `handle` remains live and the mask changes only its inheritance
+    // flag; no resource access rights or ownership are transferred here.
+    unsafe { SetHandleInformation(handle.0, HANDLE_FLAG_INHERIT.0, flags) }
+        .context("failed to update shared-handle inheritance")
 }
 
 /// Shared texture opened by one worker on the supervisor-selected adapter.
@@ -574,5 +673,17 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("B8G8R8A8_UNORM"));
+    }
+
+    #[test]
+    fn device_loss_classification_is_explicit() {
+        assert!(is_device_loss_hresult(DXGI_ERROR_DEVICE_REMOVED));
+        assert!(is_device_loss_hresult(DXGI_ERROR_DEVICE_RESET));
+        assert!(!is_device_loss_hresult(windows::Win32::Foundation::E_INVALIDARG));
+
+        let explicit = anyhow::Error::new(ResourceGenerationLost::new("abandoned"));
+        assert!(is_resource_generation_lost(&explicit));
+        let ordinary = anyhow::anyhow!("ordinary worker failure");
+        assert!(!is_resource_generation_lost(&ordinary));
     }
 }

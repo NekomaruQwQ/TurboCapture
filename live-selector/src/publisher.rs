@@ -9,6 +9,7 @@ use live_shared_texture::{
     InheritedHandle,
     OpenedMailbox,
     PRODUCER_KEY,
+    ResourceGenerationLost,
 };
 use nkcore::prelude::euclid::Size2D;
 use windows::Win32::Graphics::Direct3D11::{
@@ -39,6 +40,8 @@ pub struct SharedPublisher {
     clear_color: [f32; 4],
     /// Aggregated hot-path measurements emitted outside individual frame logs.
     metrics: PublicationMetrics,
+    /// Optional one-shot proof hook that exits while the producer key is owned.
+    abandonment_fault: Option<AbandonmentFault>,
 }
 
 impl SharedPublisher {
@@ -52,7 +55,8 @@ impl SharedPublisher {
         context: &ID3D11DeviceContext,
         handle: InheritedHandle,
         output_size: Size2D<u32>,
-        clear_color: [f32; 4]) -> anyhow::Result<Self> {
+        clear_color: [f32; 4],
+        abandon_after_publications: Option<u64>) -> anyhow::Result<Self> {
         let mailbox = OpenedMailbox::open(device, &handle, output_size)?;
         drop(handle);
         let render_target = d3d11::create_rtv_for_texture_2d(device, &mailbox.texture)
@@ -64,6 +68,7 @@ impl SharedPublisher {
                 .context("failed to create managed-output resampler")?,
             clear_color,
             metrics: PublicationMetrics::new(),
+            abandonment_fault: abandon_after_publications.map(AbandonmentFault::new),
         };
         publisher.publish_initial_clear(context)?;
         Ok(publisher)
@@ -87,9 +92,17 @@ impl SharedPublisher {
                 return Ok(());
             }
             AcquireStatus::Abandoned => {
-                anyhow::bail!("shared texture keyed mutex was abandoned by the encoder");
+                return Err(ResourceGenerationLost::new(
+                    "shared texture keyed mutex was abandoned by the encoder").into());
             }
             AcquireStatus::Acquired => {}
+        }
+        if self
+            .abandonment_fault
+            .as_mut()
+            .is_some_and(AbandonmentFault::record_acquisition)
+        {
+            abandon_for_fault_injection();
         }
 
         let publication = (|| {
@@ -127,7 +140,8 @@ impl SharedPublisher {
         match self.mailbox.mutex.acquire(PRODUCER_KEY, 0)? {
             AcquireStatus::Acquired => {}
             AcquireStatus::Timeout => anyhow::bail!("new shared texture did not expose producer key 0"),
-            AcquireStatus::Abandoned => anyhow::bail!("new shared texture mutex was already abandoned"),
+            AcquireStatus::Abandoned => return Err(ResourceGenerationLost::new(
+                "new shared texture mutex was already abandoned").into()),
         }
         // SAFETY: The render target belongs to `context`'s device; flushing
         // completes submission before the consumer key becomes visible.
@@ -136,6 +150,33 @@ impl SharedPublisher {
         unsafe { context.Flush(); }
         self.mailbox.mutex.release(CONSUMER_KEY)
     }
+}
+
+/// One-shot counter used only by the explicit abandonment hardware proof.
+struct AbandonmentFault {
+    /// Successful producer acquisitions required before forced termination.
+    after: u64,
+    /// Successful producer acquisitions observed so far.
+    acquisitions: u64,
+}
+
+impl AbandonmentFault {
+    /// Start a fault counter validated as non-zero by the CLI.
+    const fn new(after: u64) -> Self { Self { after, acquisitions: 0 } }
+
+    /// Return `true` exactly when this acquisition should abandon the mutex.
+    const fn record_acquisition(&mut self) -> bool {
+        self.acquisitions += 1;
+        self.acquisitions == self.after
+    }
+}
+
+/// Terminate without releasing producer key 0 so the peer observes abandonment.
+#[cold]
+#[expect(clippy::exit, reason = "this explicit proof hook must abandon the owned keyed mutex")]
+fn abandon_for_fault_injection() -> ! {
+    eprintln!("fault injection: exiting while producer keyed mutex is owned");
+    std::process::exit(86)
 }
 
 /// Five-second aggregate that avoids per-frame logging in the capture hot path.
@@ -191,5 +232,19 @@ impl PublicationMetrics {
             self.misses,
             average_us);
         *self = Self::new();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abandonment_fault_triggers_only_at_requested_acquisition() {
+        let mut fault = AbandonmentFault::new(3);
+        assert!(!fault.record_acquisition());
+        assert!(!fault.record_acquisition());
+        assert!(fault.record_acquisition());
+        assert!(!fault.record_acquisition());
     }
 }

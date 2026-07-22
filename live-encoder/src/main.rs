@@ -34,7 +34,13 @@ use live_encoder::{
 };
 
 use clap::Parser;
-use live_shared_texture::{AdapterLuid, SharedHandleValue};
+use live_shared_texture::{
+    AdapterLuid,
+    RESOURCE_GENERATION_LOST_EXIT_CODE,
+    ResourceGenerationLost,
+    SharedHandleValue,
+    is_resource_generation_lost,
+};
 use nkcore::prelude::*;
 use nkcore::prelude::euclid::Size2D;
 
@@ -332,9 +338,16 @@ fn main() {
         }
     };
 
-    if let Err(e) = result {
-        eprintln!("fatal: {e}");
-        std::process::exit(1);
+    if let Err(error) = result {
+        eprintln!("fatal: {error:#}");
+        let exit_code = if matches!(mode, CaptureMode::Shared { .. })
+            && is_resource_generation_lost(&error)
+        {
+            RESOURCE_GENERATION_LOST_EXIT_CODE
+        } else {
+            1
+        };
+        std::process::exit(exit_code);
     }
 }
 
@@ -347,7 +360,8 @@ fn run_shared(
     adapter_luid: AdapterLuid) -> anyhow::Result<()> {
     let frame_size = Size2D::new(width, height);
     let bundle = live_shared_texture::create_device_on_adapter(adapter_luid, true)
-        .context("failed to create encoder device on supervisor-selected adapter")?;
+        .map_err(|error| ResourceGenerationLost::new(format!(
+            "failed to create encoder device on supervisor-selected adapter: {error:#}")))?;
     log::info!(
         "shared mode: input={}x{}, adapter={} ({})",
         width,
@@ -358,7 +372,9 @@ fn run_shared(
         bundle.device,
         bundle.context,
         shared_handle.into_owned(),
-        frame_size)?;
+        frame_size)
+        .map_err(|error| ResourceGenerationLost::new(format!(
+            "failed to open supervisor shared texture: {error:#}")))?;
     let encoding_handle = spawn_stdout_encoder(input, VideoEncoderConfig {
         frame_rate,
         bitrate: DEFAULT_BITRATE,

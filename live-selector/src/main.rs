@@ -27,7 +27,13 @@ use nkcore::{
     os::windows::winit::{AppEvent, EventLoopExt as _},
     prelude::euclid::Size2D,
 };
-use live_shared_texture::{AdapterLuid, SharedHandleValue};
+use live_shared_texture::{
+    AdapterLuid,
+    RESOURCE_GENERATION_LOST_EXIT_CODE,
+    ResourceGenerationLost,
+    SharedHandleValue,
+    is_resource_generation_lost,
+};
 use presenter::Presenter;
 use publisher::SharedPublisher;
 use windows::Win32::{
@@ -85,6 +91,10 @@ struct Args {
     /// DXGI adapter LUID selected by the supervisor for the managed GPU cohort.
     #[arg(long, requires = "shared_handle")]
     adapter_luid: Option<AdapterLuid>,
+
+    /// Exit while owning the producer mutex after this many real publications.
+    #[arg(long, hide = true, requires = "shared_handle", value_parser = clap::value_parser!(u64).range(1..))]
+    fault_abandon_after_publications: Option<u64>,
 }
 
 /// Last selector target, retained so a failed WGC session can be recreated
@@ -99,9 +109,10 @@ struct SelectedTarget {
 fn main() {
     pretty_env_logger::init();
 
-    if let Err(error) = run(Args::parse()) {
-        eprintln!("fatal: {error:#}");
-        std::process::exit(1);
+    let args = Args::parse();
+    let managed = args.shared_handle.is_some();
+    if let Err(error) = run(args) {
+        exit_worker(error, managed);
     }
 }
 
@@ -142,17 +153,25 @@ fn run(args: Args) -> anyhow::Result<()> {
                     .expect("failed to create selector preview window");
             let preview_hwnd =
                 hwnd_from_window(&window).expect("failed to obtain selector preview HWND");
-            let presenter =
-                Presenter::new(preview_hwnd, output_size, CLEAR_COLOR, args.adapter_luid)
-                    .expect("failed to initialize selector preview presenter");
+            let presenter = Presenter::new(
+                preview_hwnd,
+                output_size,
+                CLEAR_COLOR,
+                args.adapter_luid)
+                .unwrap_or_else(|error| exit_worker(
+                    error.context("failed to initialize selector preview presenter"),
+                    args.adapter_luid.is_some()));
             let publisher = args.shared_handle
                 .map(|handle| SharedPublisher::new(
                     presenter.device(),
                     presenter.device_context(),
                     handle.into_owned(),
                     output_size,
-                    CLEAR_COLOR)
-                    .expect("failed to initialize managed shared output"));
+                    CLEAR_COLOR,
+                    args.fault_abandon_after_publications)
+                    .map_err(|error| ResourceGenerationLost::new(format!(
+                        "failed to initialize managed shared output: {error:#}")))
+                    .unwrap_or_else(|error| exit_worker(error.into(), true)));
             let swap_rx = spawn_selector(SelectorConfig {
                 config_path: args.config,
                 ignored_hwnd: preview_hwnd.0 as isize,
@@ -173,6 +192,7 @@ fn run(args: Args) -> anyhow::Result<()> {
                 capture: None,
                 retry_at: Instant::now(),
                 occluded: false,
+                managed: args.shared_handle.is_some(),
                 window,
             };
 
@@ -200,6 +220,8 @@ struct PreviewState {
     retry_at: Instant,
     /// Whether rendering should pause to avoid hidden-window GPU work.
     occluded: bool,
+    /// Whether device/mailbox loss must request complete generation recovery.
+    managed: bool,
     /// HWND owner, deliberately declared last so every dependent field drops first.
     window: Window,
 }
@@ -240,13 +262,13 @@ impl PreviewState {
     /// Process selector updates, acquire at most one newest WGC frame, and
     /// choose a bounded wake interval so an idle preview does not busy-spin.
     fn tick(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.apply_latest_selection(event_loop);
+        self.apply_latest_selection();
 
         let delay = if self.occluded {
             IDLE_WAKE_INTERVAL
         } else {
             self.ensure_capture();
-            self.render_next_frame(event_loop);
+            self.render_next_frame();
             if self.capture.is_some() {
                 ACTIVE_WAKE_INTERVAL
             } else {
@@ -259,7 +281,7 @@ impl PreviewState {
 
     /// Apply only the newest queued selection because intermediate targets can
     /// no longer be foreground by the time the event loop observes them.
-    fn apply_latest_selection(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    fn apply_latest_selection(&mut self) {
         let mut latest = None;
         while let Ok(command) = self.swap_rx.try_recv() {
             latest = Some(command);
@@ -280,8 +302,9 @@ impl PreviewState {
         self.retry_at = Instant::now();
 
         if let Err(error) = self.presenter.clear_and_present() {
-            log::error!("failed to clear preview during window switch: {error:#}");
-            event_loop.exit();
+            exit_worker(
+                error.context("failed to clear preview during window switch"),
+                self.managed);
         }
     }
 
@@ -307,15 +330,15 @@ impl PreviewState {
     }
 
     /// Render the newest available frame and recover from stale capture sessions.
-    fn render_next_frame(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    fn render_next_frame(&mut self) {
         let Some(capture) = self.capture.as_mut() else { return };
 
         match capture.get_next_frame(self.presenter.device_context()) {
             Ok(Some(frame)) => {
                 if let Err(error) = self.presenter.render(&frame.raw_texture, frame.size) {
-                    log::error!("failed to render selector preview: {error:#}");
-                    event_loop.exit();
-                    return;
+                    exit_worker(
+                        error.context("failed to render selector preview"),
+                        self.managed);
                 }
                 if let Some(publisher) = self.publisher.as_mut()
                     && let Err(error) = publisher.publish(
@@ -323,8 +346,9 @@ impl PreviewState {
                         self.presenter.device_context(),
                         &frame.raw_texture,
                         frame.size) {
-                    log::error!("failed to publish selector frame: {error:#}");
-                    event_loop.exit();
+                    exit_worker(
+                        error.context("failed to publish selector frame"),
+                        true);
                 }
             }
             Ok(None) => {}
@@ -335,6 +359,22 @@ impl PreviewState {
             }
         }
     }
+}
+
+/// Report a fatal selector error through the supervisor's stable exit contract.
+///
+/// Standalone errors use the conventional failure code. Managed DXGI device
+/// loss and explicit mailbox invalidation request complete resource recreation.
+#[expect(clippy::exit, reason = "winit callbacks cannot return worker failures to the supervisor")]
+#[expect(clippy::needless_pass_by_value, reason = "the diverging function owns its final diagnostic error")]
+fn exit_worker(error: anyhow::Error, managed: bool) -> ! {
+    eprintln!("fatal: {error:#}");
+    let exit_code = if managed && is_resource_generation_lost(&error) {
+        RESOURCE_GENERATION_LOST_EXIT_CODE
+    } else {
+        1
+    };
+    std::process::exit(exit_code)
 }
 
 /// Extract the Win32 HWND owned by a winit window.

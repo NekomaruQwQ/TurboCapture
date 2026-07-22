@@ -16,6 +16,7 @@ log = { workspace = true }
 nkcore = { workspace = true, features = ["debug", "winit"] }
 pretty_env_logger = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 set-dpi-awareness = { workspace = true }
 toml = { workspace = true }
 widestring = { workspace = true }

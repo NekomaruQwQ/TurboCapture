@@ -1,6 +1,6 @@
 # Live Stream Pipeline Refactor
 
-**Status:** In progress — Phase 2 complete
+**Status:** In progress — Phase 4 complete
 
 ## Purpose
 
@@ -47,7 +47,7 @@ safe pixels, `live-encoder` encodes them, `live-ws` transfers them, and
 2. **Workers do not know each other.** `live-capture` and `live-encoder` share a
    resource contract, not process-management code or crate dependencies.
 3. **The supervisor owns composition.** Adapter selection, resource creation,
-   configuration synchronization, child lifetimes, and pipe wiring belong to
+   local configuration ownership, child lifetimes, and pipe wiring belong to
    `live-stream`.
 4. **Configuration fails closed.** Missing or initially invalid selector policy
    must never fall back to capturing an arbitrary foreground window.
@@ -91,10 +91,11 @@ flowchart TB
     source --> capture
 ```
 
-The `source -> stream -> capture` path represents synchronization rather than
-policy interpretation: `live-stream` may fetch or refresh the file, but treats
-its contents as opaque. `live-capture` owns parsing and matching semantics in
-both standalone and managed use.
+The `source -> stream -> capture` path represents path ownership rather than
+policy interpretation: `live-stream` carries one local file path and passes it
+unchanged to capture. `live-capture` owns loading, reloading, parsing, and
+matching semantics in both standalone and managed use. The remote server does
+not own selector configuration.
 
 ## Component Contracts
 
@@ -146,7 +147,7 @@ Owns:
 - selecting one DXGI adapter for the managed GPU cohort;
 - creating and retaining the fixed-size shared texture;
 - passing the shared resource to both GPU workers;
-- fetching or refreshing the selector file without interpreting its contents;
+- carrying the user-selected local selector file without interpreting it;
 - launching and supervising `live-capture`, `live-encoder`, and `live-ws`;
 - connecting `live-encoder` stdout directly to `live-ws` stdin;
 - posting stream lifecycle metadata;
@@ -247,19 +248,20 @@ An abandoned keyed mutex means the shared surface can no longer be trusted.
 Either worker reports the condition and exits; `live-stream` recreates the
 texture and restarts both GPU workers as one resource generation.
 
-## Configuration Synchronization
+## Configuration Ownership
 
 Standalone `live-capture` reads a user-selected local TOML file directly and
 does not require HTTP.
 
-For managed streaming, `live-stream` may synchronize a server-provided selector
-document to a local runtime file. The update must be written atomically so
-`live-capture` never observes a partially written document. The supervisor does
-not deserialize the selector profiles; it is responsible only for fetching,
-atomic replacement, freshness diagnostics, and retry policy.
+For managed streaming, `live-stream` carries the user-selected local TOML path
+and passes it unchanged to every capture-worker restart. `live-capture` retains
+its existing bounded read, parse-before-activation, and last-valid reload
+behavior. `live-stream` does not deserialize, copy, fetch, or rewrite profiles.
 
-This division keeps networking out of `live-capture` without making server
-availability a requirement for safe standalone sharing.
+Keeping selector policy beside the streaming machine is simpler than storing it
+on `live-server`, which may run remotely and does not have the same local window
+or executable context. It also keeps configuration behavior identical between
+standalone preview and managed streaming.
 
 ## Process Supervision
 
@@ -275,6 +277,7 @@ The initial restart boundaries are:
 | `live-capture` exits | Restart `live-capture`; keep `live-encoder`, `live-ws`, and the shared texture alive |
 | `live-encoder` exits | Recreate the stdout pipe and restart `live-encoder` plus `live-ws` |
 | `live-ws` loses its connection | Existing reconnect and cache replay behavior |
+| `live-ws` process exits | Recreate the stdout pipe and restart `live-encoder` plus `live-ws` |
 | Keyed mutex is abandoned | Recreate the texture and restart both GPU workers |
 | D3D device or adapter is removed | Re-select the adapter, recreate GPU resources, and restart both GPU workers |
 | `live-stream` exits | Job Object terminates every managed child |
@@ -350,7 +353,7 @@ the shared-texture proof.
 This rename frees the `live-capture` name while retaining the existing
 `live-selector` name and a comparable legacy path during development.
 
-### Phase 3 — Shared-texture proof (In Progress)
+### Phase 3 — Shared-texture proof (Complete)
 
 - Create a minimal supervisor-owned shared texture on an explicitly selected
   adapter.
@@ -363,10 +366,10 @@ This rename frees the `live-capture` name while retaining the existing
 The implemented Phase 3 slice adds the internal `live-shared-texture` contract,
 managed `live-selector` publication, `live-encoder --mode shared`, and the
 temporary `live-texture-proof` owner. The owner selects one adapter, creates and
-retains an inheritable unnamed NT handle, launches only the two intended GPU
-workers, revokes further inheritance, and leaves encoder stdout attached directly
+retains an unnamed NT handle, enables inheritance only across the two intended
+GPU-worker spawns, and leaves encoder stdout attached directly
 to the caller's pipe. It intentionally does not implement Phase 4 restart policy,
-Job Object cleanup, selector synchronization, or stream metadata.
+Job Object cleanup, local-config ownership, or stream metadata.
 
 A bounded 1920×1200/60 release run on the RTX 5090 Laptop GPU completed with
 75,050 bytes of unchanged `live-protocol` output, a 177.7 µs shared-to-private
@@ -375,20 +378,43 @@ frames per second. That run exercised inherited-handle lifetime, initial clear
 publication, consumer misses with private-frame reuse, direct stdout wiring, and
 coupled normal shutdown with no remaining workers.
 
-Phase 3 remains in progress until an allowed live window exercises sustained
-producer publication and non-blocking producer misses, and fault injection
-confirms the raw `WAIT_ABANDONED` path terminates both workers as one invalid
-resource generation.
+The Phase 4 hardware run closed the two remaining gates. An allowed Visual
+Studio Code window sustained producer publication while the encoder continued
+at 56.9 frames per second. A one-shot fault then terminated the selector while
+it owned producer key 0: the encoder received raw `WAIT_ABANDONED`, exited with
+the stable resource-loss code, and the supervisor replaced generation 1 with a
+healthy generation 2.
 
-### Phase 4 — Introduce `live-stream`
+### Phase 4 — Introduce `live-stream` (Complete)
 
 - Implement adapter selection and shared-texture creation.
 - Launch `live-selector` and `live-encoder` with one resource-generation
   contract.
-- Supervise the selector-file synchronization task.
+- Carry the local selector file through every capture-worker restart.
 - Connect `live-encoder` stdout to `live-ws` stdin without parsing media frames.
 - Add Job Object cleanup and bounded restart backoff.
 - Move stream-mode selection and computed stream metadata into the supervisor.
+
+The implemented `live-stream --mode shared` owns the high-performance adapter,
+mailbox, scoped handle inheritance, one-shot resource-generation contract,
+selector/encoder/relay processes, and stream metadata. Selector stdout is an
+unconditional JSONL debug and metadata surface in both standalone and managed
+operation. Encoder stdout is attached directly to relay stdin as an anonymous OS
+pipe; the supervisor never reads media bytes.
+
+Each worker role has a bounded exponential restart budget. Ordinary selector
+exit preserves the encoder, relay, and mailbox. Encoder or relay exit replaces
+that pipe pair. Keyed-mutex abandonment or DXGI device loss uses stable exit code
+20 to replace the entire GPU generation. A kill-on-close Windows Job Object
+contains every descendant, including abnormal supervisor termination.
+
+Release hardware verification on the RTX 5090 Laptop GPU exercised sustained
+1920×1200/60 capture, an intentionally abandoned keyed mutex, generation 1 → 2
+recovery, independent relay and encoder termination, direct pipeline recreation,
+server unavailability, bounded supervisor exit, and forced supervisor
+termination. Selector PID remained unchanged across both media-pipeline
+restarts, the forced Job Object proof left none of its three exact child PIDs
+alive, and no worker remained afterward.
 
 ### Phase 5 — Integrate special streams
 
@@ -498,9 +524,9 @@ grounds.
 Parsing happens only on initial load and file changes, so this dependency does
 not affect the capture or encoding hot paths. The implementation must bound the
 accepted file size before parsing and report syntax or schema errors without
-partially activating a configuration. No additional dependency is planned for
-process supervision, Job Objects, DXGI adapter selection, shared resources, or
-keyed-mutex synchronization; the existing Windows bindings cover those APIs.
+partially activating a configuration. Phase 4 added no third-party dependency:
+it reuses the workspace's existing `win32job`, `ureq`, Serde/JSON, and Windows
+bindings for containment, metadata posting, and GPU-resource supervision.
 
 ## Acceptance Criteria
 
@@ -512,8 +538,8 @@ The refactor is complete when:
    texture without encoding or networking dependencies.
 3. `live-encoder` encodes that texture without knowing any capture or selector
    concepts.
-4. `live-stream` owns adapter selection, resource lifetime, config
-   synchronization, child supervision, and relay pipe wiring.
+4. `live-stream` owns adapter selection, resource lifetime, the local config
+   path, child supervision, and relay pipe wiring.
 5. Capture-target changes do not restart NVENC or `live-ws`.
 6. Worker crashes and GPU-resource abandonment recover according to the documented
    restart boundaries.

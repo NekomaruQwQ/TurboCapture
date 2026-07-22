@@ -8,6 +8,7 @@
 pub mod config;
 
 use std::{
+    io::Write as _,
     path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
@@ -49,6 +50,31 @@ struct SelectedWindow {
     pid: u32,
     /// Executable path last observed for this HWND.
     executable_path: String,
+    /// Profile label last emitted for managed or standalone diagnostics.
+    profile: String,
+    /// Window title last emitted for managed or standalone diagnostics.
+    title: String,
+    /// Human-readable executable description last emitted for diagnostics.
+    capture_info: String,
+}
+
+/// Stable line-delimited JSON contract emitted by every selector invocation.
+#[derive(serde::Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum SelectionEvent<'a> {
+    /// One foreground window has passed the complete active safety policy.
+    Selected {
+        /// Hexadecimal HWND string avoids JSON integer precision assumptions.
+        hwnd: String,
+        /// Current window title observed during selection.
+        title: &'a str,
+        /// Executable description, falling back to the title when unavailable.
+        file_description: &'a str,
+        /// First matching enabled profile in user-authored order.
+        profile: &'a str,
+    },
+    /// The prior target was revoked because active policy no longer allows it.
+    Cleared,
 }
 
 /// Spawn the preview selector and return its update receiver.
@@ -127,6 +153,7 @@ fn reload_policy(
 
             log::info!("active selector target is no longer allowed; clearing preview");
             *selected = None;
+            emit_selection_event(&SelectionEvent::Cleared);
             tx.send(SelectorCommand::Clear).is_ok()
         }
         Err(error) => {
@@ -155,17 +182,18 @@ fn select_foreground(
     }
 
     let executable_path = window.executable_path.to_string_lossy().into_owned();
-    if !policy.allows_executable(&executable_path) {
+    let Some(profile) = policy.matching_profile(&executable_path).map(str::to_owned) else {
         if selected
             .as_ref()
             .is_some_and(|current| current.hwnd == hwnd)
         {
             log::info!("selected HWND 0x{hwnd:X} is no longer allowed; clearing preview");
             *selected = None;
+            emit_selection_event(&SelectionEvent::Cleared);
             return tx.send(SelectorCommand::Clear).is_ok();
         }
         return true;
-    }
+    };
 
     if let Some(current) = selected.as_mut()
         && current.hwnd == hwnd
@@ -174,6 +202,16 @@ fn select_foreground(
         // Retain the refreshed path so the next policy reload validates the
         // exact metadata observed most recently for this active HWND.
         current.executable_path = executable_path;
+        if current.profile != profile || current.title != window.title {
+            current.profile = profile;
+            window.title.clone_into(&mut current.title);
+            emit_selection_event(&SelectionEvent::Selected {
+                hwnd: format!("0x{hwnd:X}"),
+                title: &current.title,
+                file_description: &current.capture_info,
+                profile: &current.profile,
+            });
+        }
         return true;
     }
 
@@ -184,8 +222,18 @@ fn select_foreground(
         .unwrap_or_else(|| window.title.clone());
     log::info!("selecting HWND 0x{hwnd:X} ({capture_info})");
 
+    emit_selection_event(&SelectionEvent::Selected {
+        hwnd: format!("0x{hwnd:X}"),
+        title: &window.title,
+        file_description: &capture_info,
+        profile: &profile,
+    });
+
     if tx
-        .send(SelectorCommand::Select { hwnd, capture_info })
+        .send(SelectorCommand::Select {
+            hwnd,
+            capture_info: capture_info.clone(),
+        })
         .is_err()
     {
         log::info!("preview event loop closed, selector exiting");
@@ -195,6 +243,25 @@ fn select_foreground(
         hwnd,
         pid: window.pid,
         executable_path,
+        profile,
+        title: window.title.clone(),
+        capture_info,
     });
     true
+}
+
+/// Emit one complete JSON value without making diagnostics a safety dependency.
+///
+/// Stdout is deliberately available in both standalone and managed operation.
+/// A closed or redirected output must not weaken matching or stop local preview,
+/// so serialization and pipe errors are reported to stderr and then ignored.
+fn emit_selection_event(event: &SelectionEvent<'_>) {
+    let mut stdout = std::io::stdout().lock();
+    let result = serde_json::to_writer(&mut stdout, event)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| writeln!(stdout).map_err(anyhow::Error::from))
+        .and_then(|()| stdout.flush().map_err(anyhow::Error::from));
+    if let Err(error) = result {
+        log::warn!("failed to emit selector metadata to stdout: {error:#}");
+    }
 }

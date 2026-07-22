@@ -51,10 +51,19 @@ struct ProfileDefinition {
 /// Validated, normalized policy used by foreground matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorPolicy {
-    /// Union of includes contributed by every enabled profile.
-    include_rules: Vec<String>,
+    /// Enabled profiles and their includes, retained in declared priority order.
+    profiles: Vec<EnabledProfile>,
     /// Global vetoes contributed by every enabled profile.
     exclude_rules: Vec<String>,
+}
+
+/// One enabled profile retained so metadata can report the matching policy name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnabledProfile {
+    /// User-authored profile name used as the deterministic metadata label.
+    name: String,
+    /// Normalized executable-path includes contributed by this profile.
+    include_rules: Vec<String>,
 }
 
 impl SelectorPolicy {
@@ -81,7 +90,7 @@ impl SelectorPolicy {
             anyhow::bail!("unknown enabled profiles: {names}");
         }
 
-        let mut include_rules = Vec::new();
+        let mut profiles = Vec::new();
         let mut exclude_rules = Vec::new();
         for profile_name in &document.profiles.enabled {
             // The unknown-profile check above proves every enabled name exists.
@@ -90,6 +99,7 @@ impl SelectorPolicy {
                 .definitions
                 .get(profile_name)
                 .expect("validated enabled profile must exist");
+            let mut include_rules = Vec::new();
             append_rules(
                 &mut include_rules,
                 &profile.include,
@@ -100,12 +110,39 @@ impl SelectorPolicy {
                 &profile.exclude,
                 profile_name,
                 "exclude")?;
+            profiles.push(EnabledProfile {
+                name: profile_name.clone(),
+                include_rules,
+            });
         }
 
         Ok(Self {
-            include_rules,
+            profiles,
             exclude_rules,
         })
+    }
+
+    /// Return the first enabled profile whose include accepts this executable.
+    ///
+    /// Global exclusions are evaluated first and veto every profile. Preserving
+    /// the user-authored enabled order gives overlapping profiles a stable label
+    /// without changing the existing union-based safety decision.
+    pub fn matching_profile<'a>(&'a self, executable_path: &str) -> Option<&'a str> {
+        let candidate = normalize_path(executable_path);
+        if self
+            .exclude_rules
+            .iter()
+            .any(|rule| candidate.contains(rule))
+        {
+            return None;
+        }
+        self.profiles
+            .iter()
+            .find(|profile| profile
+                .include_rules
+                .iter()
+                .any(|rule| candidate.contains(rule)))
+            .map(|profile| profile.name.as_str())
     }
 
     /// Decide whether an executable path is allowed by the active policy.
@@ -114,14 +151,7 @@ impl SelectorPolicy {
     /// empty enabled set naturally has no include match and therefore fails
     /// closed.
     pub fn allows_executable(&self, executable_path: &str) -> bool {
-        let candidate = normalize_path(executable_path);
-        self.include_rules
-            .iter()
-            .any(|rule| candidate.contains(rule))
-            && !self
-                .exclude_rules
-                .iter()
-                .any(|rule| candidate.contains(rule))
+        self.matching_profile(executable_path).is_some()
     }
 }
 
@@ -294,6 +324,24 @@ exclude = ["D:/Games/unsafe-overlay.exe"]
         let policy = SelectorPolicy::parse(CODE_POLICY).unwrap();
         assert!(policy.allows_executable("c:\\apps\\CODE.EXE"));
         assert!(policy.allows_executable("d:\\tools\\zed\\Zed.exe"));
+    }
+
+    #[test]
+    fn overlapping_profiles_report_first_enabled_name() {
+        let policy = SelectorPolicy::parse(
+            r#"
+[profiles]
+enabled = ["specific", "broad"]
+
+[profiles.specific]
+include = ["D:/Games/example.exe"]
+
+[profiles.broad]
+include = ["D:/Games/"]
+"#).unwrap();
+        assert_eq!(
+            policy.matching_profile("d:\\games\\example.exe"),
+            Some("specific"));
     }
 
     #[test]
