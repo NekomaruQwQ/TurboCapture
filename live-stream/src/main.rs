@@ -1,11 +1,12 @@
-//! `live-stream` — process and GPU-resource supervisor for one video stream.
+//! `live-stream` — process and resource supervisor for one video stream.
 //!
-//! The supervisor selects the adapter, owns the shared BGRA mailbox, launches
-//! the safe selector and texture encoder as one resource generation, and wires
-//! encoder stdout directly into `live-ws` stdin. It never parses media frames.
+//! Main mode owns the shared-texture GPU cohort. YouTube Music mode owns fixed
+//! window discovery and crop orchestration. Both wire encoder stdout directly
+//! into `live-ws` stdin without parsing media frames.
 
 mod metadata;
 mod restart;
+mod youtube_music;
 
 use std::{
     fs,
@@ -27,33 +28,47 @@ use win32job::{ExtendedLimitInfo, Job};
 /// Child-status polling remains off the media path and needs no busy wait.
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Initial Phase 4 topology. Special stream modes remain Phase 5 work.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+/// User-facing stream topologies owned exclusively by the supervisor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum StreamMode {
-    /// Local TOML safe selector, shared texture encoder, and video relay.
-    Shared,
+    /// Local profile selector, shared-texture encoder, and video relay.
+    Main,
+    /// YouTube Music window discovery, generic crop encoder, and video relay.
+    YoutubeMusic,
 }
 
 impl StreamMode {
     /// Stable CLI/metadata spelling for this topology.
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Shared => "shared",
+            Self::Main => "main",
+            Self::YoutubeMusic => "youtube-music",
+        }
+    }
+
+    /// Well-known transport identifier used when the caller omits one.
+    pub const fn default_stream_id(self) -> &'static str { self.name() }
+
+    /// Existing per-stream frame-rate defaults preserved across integration.
+    pub const fn default_fps(self) -> u32 {
+        match self {
+            Self::Main => 60,
+            Self::YoutubeMusic => 15,
         }
     }
 }
 
 /// Supervisor CLI carrying all local worker paths and stream configuration.
 #[derive(Parser)]
-#[command(name = "live-stream", about = "Supervise one shared-texture video stream")]
+#[command(name = "live-stream", about = "Supervise one well-known video stream")]
 struct Args {
     /// Supervisor-owned topology selection.
-    #[arg(long, value_enum, default_value = "shared")]
+    #[arg(long, value_enum, default_value = "main")]
     mode: StreamMode,
 
-    /// Built `live-selector` executable.
+    /// Built `live-selector` executable required by main mode.
     #[arg(long)]
-    selector: PathBuf,
+    selector: Option<PathBuf>,
 
     /// Built `live-encoder` executable.
     #[arg(long)]
@@ -63,33 +78,41 @@ struct Args {
     #[arg(long)]
     relay: PathBuf,
 
-    /// Local selector TOML carried with this supervisor invocation.
+    /// Local selector TOML carried unchanged by main mode.
     #[arg(long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     /// WebSocket ingestion URL passed unchanged to `live-ws`.
     #[arg(long)]
     server: String,
 
-    /// HTTP endpoint receiving computed selection metadata.
+    /// HTTP endpoint receiving main-mode selection metadata.
     #[arg(long)]
-    info_url: String,
+    info_url: Option<String>,
 
-    /// Well-known stream identifier used only for transport and diagnostics.
-    #[arg(long, default_value = "main")]
-    stream_id: String,
+    /// Transport identifier; defaults to the selected mode's well-known ID.
+    #[arg(long)]
+    stream_id: Option<String>,
 
     /// Fixed mailbox and encoded-stream width.
-    #[arg(long, default_value_t = 1920, value_parser = clap::value_parser!(u32).range(1..))]
-    width: u32,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    width: Option<u32>,
 
     /// Fixed mailbox and encoded-stream height.
-    #[arg(long, default_value_t = 1200, value_parser = clap::value_parser!(u32).range(1..))]
-    height: u32,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    height: Option<u32>,
 
     /// Encoder output frame rate.
-    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=60))]
-    fps: u32,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=60))]
+    fps: Option<u32>,
+
+    /// Window title prefix required by YouTube Music mode.
+    #[arg(long)]
+    youtube_music_title: Option<String>,
+
+    /// YouTube Music window rediscovery interval after capture loss.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    poll_interval_seconds: Option<u64>,
 
     /// Stop successfully after a bounded hardware/integration proof.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -100,10 +123,8 @@ struct Args {
     fault_abandon_selector_after_publications: Option<u64>,
 }
 
-/// Validated immutable configuration shared by every resource generation.
-struct SupervisorConfig {
-    /// Initial Phase 4 topology.
-    mode: StreamMode,
+/// Validated immutable main-stream configuration shared by every generation.
+struct MainConfig {
     /// Canonical selector executable path.
     selector: PathBuf,
     /// Canonical encoder executable path.
@@ -122,6 +143,19 @@ struct SupervisorConfig {
     fps: u32,
     /// One-shot keyed-mutex abandonment count used by hardware verification.
     abandonment_fault: Option<u64>,
+}
+
+/// Fully validated mode-specific invocation.
+enum ValidatedMode {
+    /// Safe profile selector and shared-texture cohort.
+    Main {
+        /// Resource and worker configuration.
+        config: MainConfig,
+        /// Server endpoint for selector transition metadata.
+        info_url: String,
+    },
+    /// Fixed YouTube Music crop producer and relay.
+    YoutubeMusic(youtube_music::Config),
 }
 
 fn main() {
@@ -145,46 +179,97 @@ fn main() {
 fn run(args: Args) -> anyhow::Result<()> {
     let deadline = args.duration_seconds
         .map(|seconds| Instant::now() + Duration::from_secs(seconds));
-    let (config, info_url) = validate_args(args)?;
+    let config = validate_args(args)?;
 
     // Assigning the supervisor before any spawn makes every descendant join the
     // kill-on-close job atomically. `ManuallyDrop` avoids closing a job containing
     // the current process during Rust unwinding; process exit closes it instead.
     let job = create_containment_job()?;
     let _job = ManuallyDrop::new(job);
-    let metadata = MetadataPoster::spawn(info_url, config.stream_id.clone())?;
-    let mut supervisor = Supervisor::new(config, metadata);
-    supervisor.start()?;
-    supervisor.monitor(deadline)
+    match config {
+        ValidatedMode::Main { config, info_url } => {
+            let metadata = MetadataPoster::spawn(info_url, config.stream_id.clone())?;
+            let mut supervisor = MainSupervisor::new(config, metadata);
+            supervisor.start()?;
+            supervisor.monitor(deadline)
+        }
+        ValidatedMode::YoutubeMusic(config) => {
+            set_dpi_awareness::per_monitor_v2()
+                .context("failed to enable per-monitor DPI awareness")?;
+            youtube_music::run(config, deadline)
+        }
+    }
 }
 
-/// Reject ambiguous paths and dimensions before creating any kernel resource.
-fn validate_args(args: Args) -> anyhow::Result<(SupervisorConfig, String)> {
-    anyhow::ensure!(
-        args.width.is_multiple_of(16) && args.height.is_multiple_of(16),
-        "width and height must be multiples of 16 (got {}x{})",
-        args.width,
-        args.height);
-    anyhow::ensure!(!args.stream_id.trim().is_empty(), "stream ID must not be empty");
+/// Reject ambiguous mode combinations before creating any kernel resource.
+fn validate_args(args: Args) -> anyhow::Result<ValidatedMode> {
+    let stream_id = args.stream_id
+        .unwrap_or_else(|| args.mode.default_stream_id().to_owned());
+    anyhow::ensure!(!stream_id.trim().is_empty(), "stream ID must not be empty");
     anyhow::ensure!(
         args.server.starts_with("ws://") || args.server.starts_with("wss://"),
         "--server must be a ws:// or wss:// URL");
-    anyhow::ensure!(
-        args.info_url.starts_with("http://") || args.info_url.starts_with("https://"),
-        "--info-url must be an http:// or https:// URL");
+    let encoder = canonical_file(&args.encoder, "encoder executable")?;
+    let relay = canonical_file(&args.relay, "relay executable")?;
+    let fps = args.fps.unwrap_or_else(|| args.mode.default_fps());
 
-    Ok((SupervisorConfig {
-        mode: args.mode,
-        selector: canonical_file(&args.selector, "selector executable")?,
-        encoder: canonical_file(&args.encoder, "encoder executable")?,
-        relay: canonical_file(&args.relay, "relay executable")?,
-        selector_config: canonical_file(&args.config, "selector config")?,
-        server: args.server,
-        stream_id: args.stream_id,
-        size: Size2D::new(args.width, args.height),
-        fps: args.fps,
-        abandonment_fault: args.fault_abandon_selector_after_publications,
-    }, args.info_url))
+    match args.mode {
+        StreamMode::Main => {
+            anyhow::ensure!(
+                args.youtube_music_title.is_none() && args.poll_interval_seconds.is_none(),
+                "--youtube-music-title and --poll-interval-seconds require --mode youtube-music");
+            let width = args.width.unwrap_or(1920);
+            let height = args.height.unwrap_or(1200);
+            anyhow::ensure!(
+                width.is_multiple_of(16) && height.is_multiple_of(16),
+                "width and height must be multiples of 16 (got {width}x{height})");
+            let info_url = args.info_url
+                .context("--info-url is required for --mode main")?;
+            anyhow::ensure!(
+                info_url.starts_with("http://") || info_url.starts_with("https://"),
+                "--info-url must be an http:// or https:// URL");
+            let selector = args.selector
+                .context("--selector is required for --mode main")?;
+            let selector_config = args.config
+                .context("--config is required for --mode main")?;
+            Ok(ValidatedMode::Main {
+                config: MainConfig {
+                    selector: canonical_file(&selector, "selector executable")?,
+                    encoder,
+                    relay,
+                    selector_config: canonical_file(&selector_config, "selector config")?,
+                    server: args.server,
+                    stream_id,
+                    size: Size2D::new(width, height),
+                    fps,
+                    abandonment_fault: args.fault_abandon_selector_after_publications,
+                },
+                info_url,
+            })
+        }
+        StreamMode::YoutubeMusic => {
+            anyhow::ensure!(
+                args.selector.is_none()
+                    && args.config.is_none()
+                    && args.info_url.is_none()
+                    && args.width.is_none()
+                    && args.height.is_none()
+                    && args.fault_abandon_selector_after_publications.is_none(),
+                "selector, config, metadata, dimensions, and selector fault options require --mode main");
+            let title = args.youtube_music_title
+                .context("--youtube-music-title is required for --mode youtube-music")?;
+            anyhow::ensure!(!title.is_empty(), "YouTube Music title prefix must not be empty");
+            Ok(ValidatedMode::YoutubeMusic(youtube_music::Config {
+                encoder,
+                relay,
+                server: args.server,
+                stream_id,
+                title,
+                fps,
+                poll_interval: Duration::from_secs(args.poll_interval_seconds.unwrap_or(5)),
+            }))
+        }
+    }
 }
 
 /// Canonicalize one required regular file for stable restart diagnostics.
@@ -206,9 +291,9 @@ fn create_containment_job() -> anyhow::Result<Job> {
 }
 
 /// Stateful process/resource owner for one well-known stream.
-struct Supervisor {
+struct MainSupervisor {
     /// Immutable worker paths and stream settings.
-    config: SupervisorConfig,
+    config: MainConfig,
     /// Non-media metadata poster shared with selector stdout readers.
     metadata: MetadataPoster,
     /// Monotonic resource-generation identifier.
@@ -231,9 +316,9 @@ struct Supervisor {
     abandonment_fault_consumed: bool,
 }
 
-impl Supervisor {
+impl MainSupervisor {
     /// Construct an empty supervisor before the first generation attempt.
-    fn new(config: SupervisorConfig, metadata: MetadataPoster) -> Self {
+    fn new(config: MainConfig, metadata: MetadataPoster) -> Self {
         Self {
             config,
             metadata,
@@ -302,7 +387,7 @@ impl Supervisor {
             .checked_add(1)
             .context("resource generation counter overflowed")?;
         let generation = self.generation;
-        self.metadata.post_inactive(generation, self.config.mode.name());
+        self.metadata.post_inactive(generation, StreamMode::Main.name());
 
         let mut mailbox = OwnedMailbox::new(self.config.size)
             .with_context(|| format!("generation {generation}: failed to create shared mailbox"))?;
@@ -462,7 +547,7 @@ impl Supervisor {
 }
 
 /// Charge one bounded restart attempt and produce a contextual exhaustion error.
-fn next_delay(
+pub(crate) fn next_delay(
     backoff: &mut RestartBackoff,
     stable_for: Duration,
     component: &str) -> anyhow::Result<Duration> {
@@ -526,7 +611,7 @@ impl Drop for EncoderRelay {
 
 /// Launch a selector with the mailbox inheritable only during this exact spawn.
 fn spawn_selector(
-    config: &SupervisorConfig,
+    config: &MainConfig,
     mailbox: &mut OwnedMailbox,
     generation: u64,
     metadata: MetadataPoster,
@@ -565,7 +650,7 @@ fn spawn_selector(
     let reader = match spawn_selector_reader(
         stdout,
         generation,
-        config.mode.name(),
+        StreamMode::Main.name(),
         metadata)
     {
         Ok(reader) => reader,
@@ -587,7 +672,7 @@ fn spawn_selector(
 
 /// Launch encoder then attach its stdout handle directly as relay stdin.
 fn spawn_pipeline(
-    config: &SupervisorConfig,
+    config: &MainConfig,
     mailbox: &mut OwnedMailbox,
     generation: u64) -> anyhow::Result<EncoderRelay> {
     let adapter = mailbox.device_bundle().adapter_luid;
@@ -646,7 +731,7 @@ fn spawn_pipeline(
 }
 
 /// Best-effort bounded cleanup for one already-started managed child.
-fn terminate(child: &mut Child) {
+pub(crate) fn terminate(child: &mut Child) {
     if !matches!(child.try_wait(), Ok(Some(_))) {
         let _ = child.kill();
         let _ = child.wait();

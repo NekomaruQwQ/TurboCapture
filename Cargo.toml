@@ -4,7 +4,6 @@ members = [
     "live-app",
     "live-audio",
     "live-encoder",
-    "live-capture-youtube-music",
     "live-kpm",
     "live-protocol",
     "live-selector",

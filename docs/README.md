@@ -72,16 +72,21 @@ This project is not semantically versioned. Instead, we track **milestones** (Mx
 
 M4 splits the system into independently runnable components connected via stdout pipes and WebSocket.  Producers (`live-encoder`, `live-audio`, `live-kpm`) write binary frames to stdout using the `live-protocol` framing format.  `live-ws` reads stdin and relays each message as a WS binary message to the server.  The server is a thin Rust relay — no process management, no circular buffering.
 
-The diagram below describes the current implementation. The video path is now
-being split further so safe window selection, GPU capture, encoding, and stream
-supervision can evolve behind explicit process boundaries; see
+The diagram below describes the current implementation. The main stream now
+uses the managed shared-texture cohort, while the YouTube Music supervisor mode
+retains the generic transitional crop encoder until final cutover; see
 [Live Stream Refactor](#live-stream-refactor-planned).
 
 ```mermaid
 graph LR
+    subgraph supervisors["live-stream modes"]
+        stream_main["<b>main</b><br/>profile config + shared texture<br/>selector + encoder + relay"]
+        stream_youtube_music["<b>youtube-music</b><br/>window finder + DPI crop<br/>encoder + relay"]
+    end
+
     subgraph producers["Rust Producers (stdout)"]
-        capture_auto["<b>live-encoder</b><br/>legacy --mode auto (main)<br/>GPU capture → NVENC<br/>→ AVCC → stdout"]
-        capture_youtube_music["<b>live-capture-youtube-music</b><br/>window finder + DPI crop<br/>spawns live-encoder --mode crop<br/>→ stdout"]
+        capture_main["<b>live-selector</b> → shared BGRA<br/><b>live-encoder --mode shared</b><br/>→ AVCC → stdout"]
+        capture_youtube_music["<b>live-encoder --mode crop</b><br/>generic HWND + crop<br/>→ AVCC → stdout"]
         audio["<b>live-audio</b><br/>WASAPI shared-mode<br/>s16le PCM → stdout"]
         kpm["<b>live-kpm</b><br/>WH_KEYBOARD_LL hook<br/>Sliding window KPM<br/>→ stdout"]
     end
@@ -93,17 +98,20 @@ graph LR
         ws_kpm["<b>live-ws</b>"]
     end
 
+    config["<b>Local Selector Config</b><br/>profile TOML path"]
+
     subgraph server["Server (Axum)"]
         relay["<b>WS Relay</b><br/>peek header bytes 0-1<br/>cache CodecParams + keyframe<br/>fan-out to clients"]
         strings["<b>String Store</b><br/>file-backed + computed<br/>($captureInfo, $liveMode)"]
-        config["<b>Selector Config</b><br/>polled by auto mode"]
     end
 
     subgraph frontend["Browser / live-app"]
         viewer["<b>Frontend</b><br/>Svelte 5 + WebCodecs<br/>AudioWorklet, KPM meter<br/>widgets, strings display"]
     end
 
-    capture_auto -- "stdout" --> ws_main
+    stream_main --> capture_main
+    stream_youtube_music --> capture_youtube_music
+    capture_main -- "stdout" --> ws_main
     capture_youtube_music -- "stdout" --> ws_youtube_music
     audio -- "stdout" --> ws_audio
     kpm -- "stdout" --> ws_kpm
@@ -113,8 +121,8 @@ graph LR
     ws_audio -- "WS binary" --> relay
     ws_kpm -- "WS binary" --> relay
 
-    capture_auto -. "HTTP (config poll)" .-> config
-    capture_auto -. "HTTP (streamInfo)" .-> strings
+    config -. "local profile path" .-> stream_main
+    stream_main -. "HTTP (streamInfo)" .-> strings
 
     relay -- "WS binary" --> viewer
     strings -- "/api/events (KPM + strings)" --> viewer
@@ -126,9 +134,8 @@ graph LR
 |-----------|----------|------|-----|
 | **`live-protocol`** | Rust (lib) | Shared 8-byte frame header + AVCC helpers + audio payloads | Used by all Rust crates |
 | **`live-shared-texture`** | Rust (internal lib + proof bin) | Explicit-adapter NT handle, keyed-mutex mailbox, and temporary Phase 3 owner | inherited handle → shared BGRA texture |
-| **`live-stream`** | Rust | Phase 4 adapter/resource owner, Job-contained process supervisor, metadata poster, and restart policy | local TOML + worker paths → managed video stream |
+| **`live-stream`** | Rust | Main shared-texture and YouTube Music crop modes, Job-contained process supervision, metadata, and restart policy | mode config + worker paths → managed video stream |
 | **`live-encoder`** | Rust | Transitional legacy capture CLI plus shared/private BGRA → NV12 → H.264 → stdout pipeline | BGRA texture → live-protocol framed stdout |
-| **`live-capture-youtube-music`** | Rust | YouTube Music window finder + DPI-aware crop + auto-restart wrapper around legacy `live-encoder --mode crop` | stdout (live-protocol framed) |
 | **`live-audio`** | Rust | WASAPI audio capture → s16le PCM | stdout (live-protocol framed) |
 | **`live-selector`** | Rust | Local profile-driven safe-capture preview with optional managed publication | TOML + WGC → preview/shared BGRA + JSONL selection events |
 | **`live-ws`** | Rust | stdin → WS relay (modes: default, video, audio) | stdin → WS binary messages |
@@ -157,10 +164,11 @@ The target architecture gives the current responsibilities clearer names:
   `live-capture`. It reads a fixed-size shared GPU texture, converts BGRA to NV12,
   encodes H.264, and writes `live-protocol` messages to stdout. It does not know
   about HWNDs, selector profiles, or capture modes.
-- **`live-stream`** — the Phase 4 supervisor for a complete video stream. It
-  carries one local selector TOML path, owns stream modes, DXGI adapter and
-  shared-texture creation, child lifetimes, computed metadata, restart policy,
-  and the `live-encoder | live-ws` pipe. It never parses selector policy or media.
+- **`live-stream`** — the supervisor for a complete video stream. Main mode
+  carries one local selector TOML path and owns the shared-texture cohort.
+  YouTube Music mode owns title-based window discovery and DPI crop policy.
+  Both own child lifetimes, restart policy, and the `live-encoder | live-ws`
+  pipe without parsing media.
 - **`live-ws`** — remains the transport worker and owns WebSocket reconnection.
 
 ```mermaid
@@ -218,7 +226,7 @@ failure recovery, performance gates, and the phased cutover.
 | HTTP/WS server | Rust (Axum) | Thin relay — uses `live-protocol` directly, no process management. Single toolchain. |
 | Window discovery | Rust (`enumerate-windows`) | Lightweight binary for Nushell scripts. JSON output. |
 | Local selector preview | Rust (`live-selector`) | Loads and atomically reloads a local profile allowlist, then owns selection, WGC, D3D11, resampling, and preview presentation independently from the encoded stream. |
-| YouTube Music capture | Rust (`live-capture-youtube-music`) | DPI-independent crop calculation from CSS constants, auto-restart on window loss. Stdout-first — piped through `live-ws` like any other producer. |
+| YouTube Music capture | Rust (`live-stream --mode youtube-music`) | DPI-independent crop policy and window rediscovery compose the generic crop encoder with `live-ws`. |
 | Orchestration | Nushell (`mod.nu`) | Launches pipelines, manages service lifecycle. |
 | Frontend | Svelte 5 + WebCodecs | Pure viewer. Receives `live-protocol` framed messages via WS. Zero H.264 knowledge. |
 
@@ -244,8 +252,8 @@ The system uses **fixed, well-known stream IDs** rather than dynamically generat
 
 | Stream ID | Producer | Purpose |
 |-----------|----------|---------|
-| `"main"` | `live-encoder --mode auto` | Foreground window (transitional auto-selector) |
-| `"youtube-music"` | `live-encoder --mode crop` | YouTube Music playback bar |
+| `"main"` | `live-stream --mode main` | Profile-allowlisted foreground window |
+| `"youtube-music"` | `live-stream --mode youtube-music` | YouTube Music playback bar |
 
 **Why fixed IDs?**  The frontend is a pure viewer — it has zero stream management logic.  It renders `"main"` unconditionally and shows `"youtube-music"` when available (polled via `GET /api/streams`).  No discovery protocol, no negotiation, no dynamic allocation.  When the auto-selector hot-swaps the captured window, the stream ID stays `"main"` — the server sends fresh CodecParams and a keyframe, and the frontend reinitializes its decoder.
 
@@ -288,8 +296,8 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `just server` | Start the Axum server (requires `LIVE_PORT`, `LIVE_VITE_PORT`) |
 | `just capture auto` | Start the auto-selector capture pipeline |
 | `just run capture shared` | Start the temporary Phase 3 shared-texture proof pipeline |
-| `just run capture stream` | Start the Phase 4 `live-stream` supervised pipeline |
-| `just capture youtube-music` | Start the YouTube Music crop capture pipeline |
+| `just run capture main` | Start the profile-driven supervised main stream |
+| `just run capture youtube-music` | Start the supervised YouTube Music crop stream |
 | `just kpm` | Start the keystroke counter pipeline |
 | `just audio` | Start the audio capture pipeline |
 | `just app` | Launch the webview host |
@@ -314,8 +322,8 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
 | `run-capture auto` | Launch the transitional auto-selector pipeline (`live-encoder \| live-ws`) |
 | `run-capture shared [--config path]` | Launch `live-texture-proof` with managed selector/encoder workers and pipe encoder stdout to `live-ws` |
-| `run-capture stream [--config path]` | Launch `live-stream` with a local TOML, Job-contained workers, restart policy, and direct encoder-to-relay pipe |
-| `run-capture youtube-music` | Launch `live-capture-youtube-music \| live-ws` pipeline |
+| `run-capture main [--config path]` | Launch `live-stream --mode main` with a local TOML, shared-texture cohort, and direct encoder-to-relay pipe |
+| `run-capture youtube-music` | Launch `live-stream --mode youtube-music` with title discovery, DPI crop policy, and a supervised encoder-to-relay pipe |
 | `run-audio [device]` | Launch the audio pipeline (`live-audio \| live-ws --mode audio`) |
 | `run-kpm` | Launch the KPM pipeline (`live-kpm \| live-ws`) |
 | `run-ccusage [--loop]` | Run `ccusage` once (default) or every 60s (`--loop`) and post today's Claude Code token + cost totals to the string store |
@@ -446,14 +454,19 @@ live-encoder --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
 
 ### live-stream CLI
 
-`live-stream` owns the Phase 4 managed topology. It selects the high-performance
+`live-stream` owns two Phase 5 topologies. `main` selects the high-performance
 DXGI adapter, creates one shared-texture generation, restricts handle inheritance
-to the two GPU workers, connects encoder stdout directly to relay stdin, and
-contains every descendant in a kill-on-close Windows Job Object. Ordinary
-selector exit restarts only the selector; encoder or relay exit recreates that
-pipe pair; keyed-mutex abandonment or DXGI device loss replaces the complete GPU
-generation. Every restart class uses capped exponential backoff with a finite
-consecutive-attempt budget.
+to the two GPU workers, and carries a local profile TOML to `live-selector`.
+`youtube-music` discovers the titled window, computes its DPI-aware player-bar
+crop, and launches the generic transitional crop encoder. Both modes connect
+encoder stdout directly to relay stdin and contain every descendant in a
+kill-on-close Windows Job Object.
+
+In main mode, ordinary selector exit restarts only the selector; encoder or relay
+exit recreates that pipe pair; keyed-mutex abandonment or DXGI device loss
+replaces the complete GPU generation. YouTube Music encoder or relay exit drops
+the pair and rediscovers the window before rebuilding it. Every restart class
+uses capped exponential backoff with a finite consecutive-attempt budget.
 
 The selector TOML always remains local to the streaming machine. `live-stream`
 passes its path unchanged and never fetches, copies, or parses policy. The server
@@ -461,14 +474,20 @@ may run remotely without becoming a configuration authority.
 
 ```bash
 # Repository launcher (preferred during migration)
-just run capture stream --config data/selector-new.toml
+just run capture main --config data/selector-new.toml
 
-# Direct invocation; worker executables are normally resolved by mod.nu
-live-stream --mode shared \
+# Direct main invocation; worker executables are normally resolved by mod.nu
+live-stream --mode main \
   --selector live-selector.exe --encoder live-encoder.exe --relay live-ws.exe \
-  --config data/selector-new.toml --stream-id main \
+  --config data/selector-new.toml \
   --server ws://host/internal/streams/main \
   --info-url http://host/internal/streams/main/info
+
+# Direct YouTube Music invocation; defaults to stream ID youtube-music and 15 fps
+live-stream --mode youtube-music \
+  --encoder live-encoder.exe --relay live-ws.exe \
+  --youtube-music-title "YouTube Music - Nekomaru LiveUI" \
+  --server ws://host/internal/streams/youtube-music
 ```
 
 ### live-selector CLI
@@ -596,7 +615,7 @@ Server-managed key-value store. Keys prefixed with `$` are **computed strings** 
 | Key | Source | Description |
 |-----|--------|-------------|
 | `$captureInfo` | `POST /internal/streams/:id/info` | Human-readable label for the captured window |
-| `$captureMode` | `POST /internal/streams/:id/info` | Current topology (e.g. `"auto"`, `"shared"`) |
+| `$captureMode` | `POST /internal/streams/:id/info` | Current topology (e.g. `"auto"`, `"main"`) |
 | `$liveMode` | `POST /internal/streams/:id/info` | Matched legacy tag or first matching enabled TOML profile (e.g. `"code"`, `"game"`) |
 | `$microphone` | Audio encoder connect/disconnect | Audio stream status (present when `live-audio` encoder is connected, absent otherwise) |
 | `$timestamp` | Server startup | Revision timestamp via `jj log` |
@@ -693,16 +712,18 @@ managed input mode via `--mode`:
 
 - **`base`** (default): captures a specific window by HWND, resamples to `--width x --height`.
 - **`auto`**: foreground polling + pattern matching + hot-swap capture session. The encoder never restarts — only the `CaptureSession` is replaced on window switch.
-- **`crop`**: extracts an absolute subrect via `--crop-min-x/y --crop-max-x/y`. Used for YouTube Music playback bar.  Typically launched by `live-capture-youtube-music` which computes the crop rect from CSS layout constants and actual DPI.
+- **`crop`**: extracts an absolute subrect via `--crop-min-x/y --crop-max-x/y`. The transitional input is generic; `live-stream --mode youtube-music` supplies its special window and DPI-aware player-bar policy.
 - **`shared`**: opens the inherited supervisor texture on an explicit adapter,
   copies complete publications privately, and owns only conversion, encoding,
   and stdout framing.
 
 All modes output to stdout via `live-protocol` framing. Pipe through `live-ws` for network delivery.
 
-`live-stream --mode shared` is a supervisor topology rather than another encoder
-input mode: it composes the selector, encoder `shared` mode, relay, local TOML,
-resource generation, metadata, and restart policy.
+`live-stream --mode main` and `live-encoder --mode shared` are intentionally
+different layers: the former composes selector policy, the shared-texture
+resource generation, encoder input, relay, metadata, and restart policy. The
+YouTube Music supervisor mode composes the generic transitional crop input
+without teaching the encoder a special-stream name.
 
 ### Selector Pattern Format
 
@@ -718,8 +739,8 @@ The auto-selector matches foreground windows against patterns from the server co
 M4's microservice design enables splitting components across machines.  Each producer is a stdout-first executable piped through `live-ws` — just point `live-ws` at a remote server URL.
 
 ```
-Machine A (streaming):  server + live-capture-youtube-music + YouTube Music + OBS + live-app
-Machine B (working):    live-encoder --mode auto (main) + live-kpm
+Machine A (streaming):  server + live-stream --mode youtube-music + YouTube Music + OBS + live-app
+Machine B (working):    live-stream --mode main + live-kpm
 ```
 
 - YouTube Music audio: OBS captures system audio directly on Machine A.  Zero network audio transfer.
@@ -873,11 +894,12 @@ LiveUI/
 │       ├── lib.rs                   # Adapter, scoped NT handle, descriptor, mutex + loss contract
 │       └── bin/live-texture-proof.rs # Temporary owner/worker launcher
 │
-├── live-stream/                     # Phase 4 managed video supervisor (Rust)
+├── live-stream/                     # Phase 5 multi-topology video supervisor (Rust)
 │   └── src/
 │       ├── main.rs                  # Job containment, resource generations, child/pipe ownership
 │       ├── metadata.rs              # Selector JSONL reader + bounded-time HTTP poster
-│       └── restart.rs               # Pure restart boundaries + bounded exponential policy
+│       ├── restart.rs               # Pure restart boundaries + bounded exponential policy
+│       └── youtube_music.rs         # Window discovery, DPI crop policy, generic crop supervision
 │
 ├── live-encoder/                    # Transitional capture CLI + extracted encoder (Rust)
 │   └── src/
@@ -893,11 +915,6 @@ LiveUI/
 │       └── selector/                # Auto-selector (foreground polling, pattern matching)
 │           ├── mod.rs               # Selector thread + non-blocking poster worker (keep-alive POSTs, swap-aware coalescing)
 │           └── config.rs            # PresetConfig, ParsedPattern, should_capture()
-│
-├── live-capture-youtube-music/       # YouTube Music player bar capture wrapper (Rust)
-│   └── src/
-│       ├── main.rs                  # CLI, retry loop, child process spawning
-│       └── crop.rs                  # DPI-aware crop: CSS layout → empirical title bar offset
 │
 ├── live-audio/                      # WASAPI audio capture → stdout (Rust)
 │   └── src/main.rs                  # CLI (--device, --list-devices), WASAPI capture, PCM chunking

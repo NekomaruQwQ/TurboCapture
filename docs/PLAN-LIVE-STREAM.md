@@ -1,6 +1,6 @@
 # Live Stream Pipeline Refactor
 
-**Status:** In progress — Phase 4 complete
+**Status:** In progress — Phase 5 complete
 
 ## Purpose
 
@@ -416,13 +416,28 @@ termination. Selector PID remained unchanged across both media-pipeline
 restarts, the forced Job Object proof left none of its three exact child PIDs
 alive, and no worker remained afterward.
 
-### Phase 5 — Integrate special streams
+### Phase 5 — Integrate special streams (Complete)
 
 - Express the main automatic stream as one `live-stream` mode using a profile
   configuration source.
 - Decide whether the YouTube Music wrapper becomes a `live-stream` mode or an
   independent capture-config provider.
 - Keep low-level capture and encoding workers free of special-stream names.
+
+The supervisor now exposes semantic `main` and `youtube-music` modes instead of
+the Phase 4 implementation-detail `shared` mode. Main mode carries the local
+profile source and retains the proven selector/shared-texture/encoder/relay
+resource-generation behavior. The standard launcher is now
+`just run capture main --config <path>`.
+
+The YouTube Music wrapper became the second `live-stream` topology rather than a
+capture-config provider. Its title-prefix discovery and DPI-aware player-bar crop
+policy moved into the supervisor, which directly owns the generic crop encoder
+and relay pair, window rediscovery, bounded restart backoff, and Job containment.
+The dedicated wrapper crate was removed. `live-encoder` still sees only generic
+`crop` arguments, and neither low-level GPU worker contains a special-stream
+mode or name. Replacing that transitional direct-capture input with the canonical
+shared-texture capture path remains part of final cutover.
 
 ### Phase 6 — Verify the transitional pipeline
 
@@ -442,7 +457,8 @@ alive, and no worker remained afterward.
 - Preserve optional fixed-size presentation for safe screen sharing.
 - Remove selector HTTP fetching and encoded-stream responsibilities from the
   capture binary.
-- Switch Nushell orchestration and `just` recipes to launch `live-stream`.
+- Remove the transitional auto/shared launchers so `live-stream` modes are the
+  only production orchestration path.
 - Remove the legacy encoder `--mode auto|base|crop` interface after equivalent
   stream modes are available.
 - Remove duplicated selector, WGC, D3D11, resampler, and shader implementations.
@@ -524,9 +540,10 @@ grounds.
 Parsing happens only on initial load and file changes, so this dependency does
 not affect the capture or encoding hot paths. The implementation must bound the
 accepted file size before parsing and report syntax or schema errors without
-partially activating a configuration. Phase 4 added no third-party dependency:
+partially activating a configuration. Phases 4 and 5 added no third-party dependency:
 it reuses the workspace's existing `win32job`, `ureq`, Serde/JSON, and Windows
-bindings for containment, metadata posting, and GPU-resource supervision.
+bindings for containment, metadata posting, GPU-resource supervision, window
+discovery, and DPI-aware crop geometry.
 
 ## Acceptance Criteria
 

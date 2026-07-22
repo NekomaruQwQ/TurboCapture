@@ -1361,22 +1361,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "live-capture-youtube-music"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "enumerate-windows",
- "euclid",
- "log",
- "pretty_env_logger",
- "set-dpi-awareness",
- "tap",
- "win32job",
- "windows 0.62.2",
-]
-
-[[package]]
 name = "live-encoder"
 version = "0.1.0"
 dependencies = [
@@ -1474,14 +1458,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "enumerate-windows",
  "euclid",
  "live-shared-texture",
  "log",
  "pretty_env_logger",
  "serde",
  "serde_json",
+ "set-dpi-awareness",
  "ureq",
  "win32job",
+ "windows 0.62.2",
 ]
 
 [[package]]

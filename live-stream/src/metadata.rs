@@ -222,19 +222,19 @@ mod tests {
             "file_description":"Code",
             "profile":"code"
         }"#).unwrap();
-        let update = StreamInfoUpdate::from_event(event, "shared");
+        let update = StreamInfoUpdate::from_event(event, "main");
         assert!(update.active);
         assert_eq!(update.hwnd, "0x1234");
         assert_eq!(update.mode.as_deref(), Some("code"));
-        assert_eq!(update.capture_mode, "shared");
+        assert_eq!(update.capture_mode, "main");
     }
 
     #[test]
     fn clear_event_removes_target_specific_values() {
-        let update = StreamInfoUpdate::from_event(SelectorEvent::Cleared, "shared");
+        let update = StreamInfoUpdate::from_event(SelectorEvent::Cleared, "main");
         assert!(!update.active);
         assert!(update.hwnd.is_empty());
         assert!(update.mode.is_none());
-        assert_eq!(update.capture_mode, "shared");
+        assert_eq!(update.capture_mode, "main");
     }
 }

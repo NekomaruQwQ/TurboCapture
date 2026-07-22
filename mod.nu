@@ -239,46 +239,44 @@ export def --wrapped "run-capture shared" [--config: path, ...args]: nothing -> 
         --server $server_url)
 }
 
-# Start the Phase 4 process supervisor. Unlike the Phase 3 proof launcher,
+# Start the supervised main stream from a local selector profile source.
 # live-stream owns the encoder-to-relay pipe, resource-generation recovery,
 # Job Object containment, and metadata posting. Selector policy remains a local
 # TOML carried with this invocation and interpreted only by live-selector.
-export def --wrapped "run-capture stream" [--config: path, ...args]: nothing -> nothing {
+export def --wrapped "run-capture main" [--config: path, ...args]: nothing -> nothing {
     get-url | ignore
     let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
-    let selector_path = get-exe "live-selector" --copy "stream"
-    let encoder_path = get-exe "live-encoder" --copy "stream"
-    let relay_path = get-exe "live-ws" --copy "stream"
-    let supervisor_path = get-exe "live-stream" --copy "stream"
+    let selector_path = get-exe "live-selector" --copy "main"
+    let encoder_path = get-exe "live-encoder" --copy "main"
+    let relay_path = get-exe "live-ws" --copy "main"
+    let supervisor_path = get-exe "live-stream" --copy "main"
 
     (^$supervisor_path
-        --mode shared
+        --mode main
         --selector $selector_path
         --encoder $encoder_path
         --relay $relay_path
         --config $config_path
-        --stream-id main
         --server (get-url --ws "/internal/streams/main")
         --info-url (get-url "/internal/streams/main/info")
         ...$args)
 }
 
-# Start the YouTube Music crop capture pipeline.
-#
-# Uses `live-capture-youtube-music` which handles window discovery, DPI-aware
-# crop rect computation, and auto-restart internally.  We just pipe it to
-# `live-ws` for WebSocket delivery.
-export def "run-capture youtube-music" []: nothing -> nothing {
-    # Ensure live-encoder is built — spawned internally by live-capture-youtube-music.
-    get-exe "live-encoder" --copy "youtube-music" | ignore
-    # Ensure LIVE_HOST is set for URL parsing.
+# Start the supervised YouTube Music crop stream. The supervisor owns window
+# discovery, DPI-aware crop policy, the generic crop encoder, and relay restarts.
+export def --wrapped "run-capture youtube-music" [...args]: nothing -> nothing {
     get-url | ignore
+    let encoder_path = get-exe "live-encoder" --copy "youtube-music"
+    let relay_path = get-exe "live-ws" --copy "youtube-music"
+    let supervisor_path = get-exe "live-stream" --copy "youtube-music"
 
-    (^(get-exe "live-capture-youtube-music")
-        -t $YOUTUBE_MUSIC_TITLE
-    |^(get-exe "live-ws" --copy "youtube-music")
-        --mode video
-        --server (get-url --ws "/internal/streams/youtube-music"))
+    (^$supervisor_path
+        --mode youtube-music
+        --encoder $encoder_path
+        --relay $relay_path
+        --youtube-music-title $YOUTUBE_MUSIC_TITLE
+        --server (get-url --ws "/internal/streams/youtube-music")
+        ...$args)
 }
 
 # Start the audio capture pipeline.

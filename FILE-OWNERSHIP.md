@@ -24,7 +24,6 @@ live-protocol/Cargo.toml                    human
 live-selector/Cargo.toml                    human
 live-ws/Cargo.toml                          human
 live-encoder/Cargo.toml                     human
-live-capture-youtube-music/Cargo.toml       human
 live-kpm/Cargo.toml                         human
 live-server/Cargo.toml                      human
 live-stream/Cargo.toml                      human
@@ -63,6 +62,7 @@ src/main.rs                                 agent
 src/main.rs                                 agent
 src/metadata.rs                             agent
 src/restart.rs                              agent
+src/youtube_music.rs                        agent
 
 ## live-selector/
 src/main.rs                                 agent
@@ -78,10 +78,6 @@ src/selector/config.rs                      agent
 ## crates/live-shared-texture/
 src/lib.rs                                  agent
 src/bin/live-texture-proof.rs               agent
-
-## live-capture-youtube-music/
-src/main.rs                                 agent
-src/crop.rs                                 agent
 
 ## live-encoder/
 src/main.rs                                 agent

@@ -8,6 +8,8 @@ workspace = true
 
 [dependencies]
 live-shared-texture = { path = "../crates/live-shared-texture" }
+enumerate-windows = { workspace = true }
+set-dpi-awareness = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -18,3 +20,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ureq = { workspace = true }
 win32job = { workspace = true }
+
+windows = { workspace = true, features = [
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
