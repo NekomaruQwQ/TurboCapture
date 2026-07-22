@@ -2,6 +2,15 @@
 
 Nekomaru's streaming infrastructure. **Portfolio demonstration only.**
 
+## Platform Baseline
+
+This project assumes the latest stable Windows 11 release, current GPU drivers,
+and a modern DirectX runtime and hardware feature level. Compatibility with
+older Windows releases, legacy drivers, or legacy GPU feature levels is out of
+scope. Some graphics paths deliberately use Direct3D 11 interfaces because they
+fit Windows Graphics Capture, shared textures, Media Foundation, and NVENC; that
+API choice is not a promise of DirectX 11-era platform compatibility.
+
 ## ⚠️ WARNING
 
 **DO NOT build or run this project.**

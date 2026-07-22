@@ -6,6 +6,17 @@
 
 ---
 
+## Platform Baseline
+
+Nekomaru LiveUI assumes the latest stable Windows 11 release, current GPU
+drivers, and a modern DirectX runtime and hardware feature level. Supporting
+older Windows releases, legacy drivers, or legacy GPU feature levels is not a
+design constraint. Direct3D 11 interfaces remain intentional where they best
+fit Windows Graphics Capture, shared textures, Media Foundation, and NVENC;
+using those interfaces does not imply DirectX 11-era platform compatibility.
+
+---
+
 ## Agent Rules
 
 - **Always use `--release`** when invoking `cargo build` or `cargo run`. All binaries in this project are release-built by default.
@@ -114,10 +125,11 @@ graph LR
 | Component | Language | Role | I/O |
 |-----------|----------|------|-----|
 | **`live-protocol`** | Rust (lib) | Shared 8-byte frame header + AVCC helpers + audio payloads | Used by all Rust crates |
-| **`live-encoder`** | Rust | Transitional legacy capture CLI plus extracted BGRA → NV12 → H.264 → stdout pipeline | BGRA texture → live-protocol framed stdout |
+| **`live-shared-texture`** | Rust (internal lib + proof bin) | Explicit-adapter NT handle, keyed-mutex mailbox, and temporary Phase 3 owner | inherited handle → shared BGRA texture |
+| **`live-encoder`** | Rust | Transitional legacy capture CLI plus shared/private BGRA → NV12 → H.264 → stdout pipeline | BGRA texture → live-protocol framed stdout |
 | **`live-capture-youtube-music`** | Rust | YouTube Music window finder + DPI-aware crop + auto-restart wrapper around legacy `live-encoder --mode crop` | stdout (live-protocol framed) |
 | **`live-audio`** | Rust | WASAPI audio capture → s16le PCM | stdout (live-protocol framed) |
-| **`live-selector`** | Rust | Local profile-driven safe-capture preview | TOML policy + WGC → fixed-size D3D11 window |
+| **`live-selector`** | Rust | Local profile-driven safe-capture preview with optional managed publication | TOML policy + WGC → preview and/or shared BGRA texture |
 | **`live-ws`** | Rust | stdin → WS relay (modes: default, video, audio) | stdin → WS binary messages |
 | **`live-kpm`** | Rust | Keystroke counter | stdout (live-protocol framed) |
 | **`enumerate-windows`** | Rust | Window discovery (JSON) | stdout JSON |
@@ -273,6 +285,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `just install` | Build all Rust binaries (`cargo build -r`) + install frontend deps (`bun i`) |
 | `just server` | Start the Axum server (requires `LIVE_PORT`, `LIVE_VITE_PORT`) |
 | `just capture auto` | Start the auto-selector capture pipeline |
+| `just run capture shared` | Start the temporary Phase 3 shared-texture proof pipeline |
 | `just capture youtube-music` | Start the YouTube Music crop capture pipeline |
 | `just kpm` | Start the keystroke counter pipeline |
 | `just audio` | Start the audio capture pipeline |
@@ -297,6 +310,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `run-selector [--config path]` | Launch the fixed-size local profile preview; defaults to ignored `data/selector-new.toml` |
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
 | `run-capture auto` | Launch the transitional auto-selector pipeline (`live-encoder \| live-ws`) |
+| `run-capture shared [--config path]` | Launch `live-texture-proof` with managed selector/encoder workers and pipe encoder stdout to `live-ws` |
 | `run-capture youtube-music` | Launch `live-capture-youtube-music \| live-ws` pipeline |
 | `run-audio [device]` | Launch the audio pipeline (`live-audio \| live-ws --mode audio`) |
 | `run-kpm` | Launch the KPM pipeline (`live-kpm \| live-ws`) |
@@ -401,8 +415,9 @@ live-audio --device "..." > dump.bin
 
 During the refactor, `live-encoder` retains the old direct-capture modes for
 end-to-end comparison. Its encoding-owned path now begins at a validated fixed-
-size BGRA texture boundary; Phase 3 replaces the in-process producer with a
-private copy from the supervisor-owned shared texture.
+size BGRA texture boundary. Its `shared` mode opens an inherited supervisor-owned
+mailbox, copies the latest complete publication into a private GPU texture, and
+releases the producer key before conversion or encoding begins.
 
 ```bash
 # Base mode — capture + encode to stdout
@@ -417,6 +432,10 @@ live-encoder --mode auto --width 1920 --height 1200 \
 live-encoder --mode crop --hwnd 0x1A2B \
   --crop-min-x 0 --crop-min-y 600 --crop-max-x 1920 --crop-max-y 700 --fps 15
 
+# Managed mode — normally launched by live-texture-proof/live-stream
+live-encoder --mode shared --width 1920 --height 1200 \
+  --adapter-luid 0x... --shared-handle 0x...
+
 # Dump to file (production code path — same output format)
 live-encoder --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
 ```
@@ -428,7 +447,10 @@ foreground executable paths against their unioned includes and global exclusion
 vetoes, and resamples the selected window directly into a fixed-size local D3D11
 window. Invalid initial configuration fails closed; invalid reloads retain the
 last fully validated policy. It performs no NV12 conversion, H.264 encoding,
-stdout framing, or network transport.
+stdout framing, or network transport. When the temporary proof owner supplies an
+adapter LUID and inherited handle, it also publishes resampled BGRA frames with a
+zero-timeout producer acquisition; a busy encoder drops only that publication
+and never stalls capture or local presentation.
 
 ```bash
 # Normally launched through the repository environment helper
@@ -437,6 +459,10 @@ just run selector
 # Standalone invocation
 live-selector --config data/selector-new.toml \
   --width 1920 --height 1200 --title "Live Selector"
+
+# Managed-output plumbing is supervisor-only
+live-selector --config data/selector-new.toml --width 1920 --height 1200 \
+  --adapter-luid 0x... --shared-handle 0x...
 ```
 
 The preview excludes its own HWND from selector matching. Focusing the preview
@@ -605,18 +631,26 @@ NAL unit types: SPS(7) ~27B, PPS(8) ~8B, IDR(5) ~67KB, NonIDR(1) ~1.5-30KB.
 
 #### "Bakery Model" (Capture Thread ↔ Encoding Thread)
 
-Within transitional `live-encoder`, the capture thread (main) and encoding thread share a staging texture ("the shelf"). The capture thread continuously restocks it with the latest captured frame; the encoding pipeline validates that fixed-size BGRA input before converting and reading at a constant 60fps. No channels or CPU copies are introduced. Phase 3 replaces this same-process handoff with a keyed-mutex shared texture and an encoder-private GPU copy.
+Within transitional direct-capture modes, the capture thread (main) and encoding
+thread share a staging texture ("the shelf"). In managed mode, the shelf is an
+encoder-private texture: key 1 is held only while `CopyResource` is submitted
+from the cross-process mailbox, then key 0 is released before BGRA-to-NV12
+conversion. No CPU pixel copies are introduced in either path.
 
 In **auto mode**, the capture session can be hot-swapped without restarting the encoder. The staging texture dimensions are fixed (set at startup), so the encoder's input format never changes. On window switch, only the `CaptureSession` is replaced.
 
 
 ### Capture Modes
 
-The transitional `live-encoder` CLI supports three legacy modes via `--mode`:
+The transitional `live-encoder` CLI supports three legacy capture modes and one
+managed input mode via `--mode`:
 
 - **`base`** (default): captures a specific window by HWND, resamples to `--width x --height`.
 - **`auto`**: foreground polling + pattern matching + hot-swap capture session. The encoder never restarts — only the `CaptureSession` is replaced on window switch.
 - **`crop`**: extracts an absolute subrect via `--crop-min-x/y --crop-max-x/y`. Used for YouTube Music playback bar.  Typically launched by `live-capture-youtube-music` which computes the crop rect from CSS layout constants and actual DPI.
+- **`shared`**: opens the inherited supervisor texture on an explicit adapter,
+  copies complete publications privately, and owns only conversion, encoding,
+  and stdout framing.
 
 All modes output to stdout via `live-protocol` framing. Pipe through `live-ws` for network delivery.
 
@@ -784,10 +818,15 @@ LiveUI/
 │       ├── avcc.rs                  # Annex B → AVCC conversion, codec string, avcC builder
 │       └── video.rs                 # CodecParams + Frame payload serialization
 │
+├── crates/live-shared-texture/      # Phase 3 D3D11 mailbox contract + proof owner
+│   └── src/
+│       ├── lib.rs                   # Adapter LUID, NT handle, descriptor + mutex contract
+│       └── bin/live-texture-proof.rs # Temporary owner/worker launcher
+│
 ├── live-encoder/                    # Transitional capture CLI + extracted encoder (Rust)
 │   └── src/
 │       ├── lib.rs                   # NALUnit/NALUnitType types, module re-exports
-│       ├── main.rs                  # CLI: --mode base|auto|crop, capture loop, encoding thread
+│       ├── main.rs                  # CLI: --mode base|auto|crop|shared
 │       ├── capture.rs               # WinRT CaptureSession, CropBox, viewport calculation
 │       ├── converter.rs             # GPU BGRA→NV12 via ID3D11VideoProcessor
 │       ├── d3d11.rs                 # D3D11 device, texture, RTV/SRV helpers
@@ -814,6 +853,7 @@ LiveUI/
 │   └── src/
 │       ├── main.rs                  # CLI, selector integration, winit lifecycle
 │       ├── presenter.rs             # D3D11 swap chain + direct GPU presentation
+│       ├── publisher.rs             # Zero-timeout shared-texture publication + metrics
 │       ├── capture.rs               # Preview-owned WGC session + viewport calculation
 │       ├── d3d11.rs                 # Preview-owned D3D11 device and view helpers
 │       ├── resample.rs + .hlsl      # Preview-owned fullscreen resampler and shader
@@ -905,6 +945,23 @@ LiveUI/
 **Fix**: Spawn a dedicated `selector-poster` worker thread that owns a `ureq::Agent` (HTTP keep-alive) and drains an `mpsc` channel.  The selector enqueues swap-tagged tasks before dispatching swap commands; the worker preserves swap order and coalesces stale heartbeats so a recovered server isn't flooded.  Strict ordering relaxes to best-effort by latency margin — localhost POST + WS broadcast (~5–15 ms) almost always wins against capture + NVENC + WS (~20–60 ms), so the flicker stays absent in practice.
 
 **Lesson**: When a polling loop calls a blocking syscall (HTTP, IO, etc.) on every tick, the loop's worst-case period is the syscall's worst-case latency.  If a timing invariant is only enforced by happening to block, that invariant is often actually a latency-margin one and can be made explicit.
+
+### Bug #5: New DXGI Interface Did Not Mean a New Factory Generation
+
+**Problem**: the first Phase 3 mailbox used
+`CreateDXGIFactory::<IDXGIFactory6>()`. The returned COM object exposed the v6
+interface and adapter enumeration worked, but D3D11 still classified devices
+created from those adapters as DXGI-1.0-derived. Every texture carrying
+`D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX` therefore failed with `E_INVALIDARG`.
+
+**Fix**: create the factory with `CreateDXGIFactory1::<IDXGIFactory6>()`. The
+API used to create the object—not merely the newest interface queried from
+it—establishes the factory generation required by keyed-mutex resources.
+
+The same hardware proof also disabled winit drag/drop for `live-selector`:
+winit otherwise calls STA-oriented `OleInitialize`, which conflicts with the
+MTA already selected for Windows Graphics Capture. The preview has no file-drop
+behavior, so disabling that unused integration is the narrow fix.
 
 ---
 

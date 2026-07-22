@@ -223,13 +223,15 @@ impl H264Encoder {
     ///
     /// - `frame_source`: called on `METransformNeedInput` — must return an NV12 texture.
     /// - `frame_target`: called on `METransformHaveOutput` — receives the parsed NAL units.
+    ///
+    /// Input acquisition failures terminate the loop so an abandoned shared
+    /// texture can be reported to the process supervisor instead of panicking.
     pub fn run<
-        Src: FnMut() -> ID3D11Texture2D,
+        Src: FnMut() -> anyhow::Result<ID3D11Texture2D>,
         Dst: FnMut(Vec<NALUnit>)>(
         mut self,
         mut frame_source: Src,
-        mut frame_target: Dst) {
-        #[expect(clippy::infinite_loop, reason = "encoder runs until process exit")]
+        mut frame_target: Dst) -> anyhow::Result<()> {
         loop {
             // Blocking wait for the next async MFT event.
             // SAFETY: `mf_event_generator` is a valid IMFMediaEventGenerator from
@@ -260,14 +262,12 @@ impl H264Encoder {
                 METransformNeedInput => {
                     log::trace!("METransformNeedInput received");
                     self.process_input(&mut frame_source)
-                        .context("H264Encoder::process_input failed")
-                        .unwrap();
+                        .context("H264Encoder::process_input failed")?;
                 },
                 METransformHaveOutput => {
                     log::trace!("METransformHaveOutput received");
                     self.process_output(&mut frame_target)
-                        .context("H264Encoder::process_output failed")
-                        .unwrap();
+                        .context("H264Encoder::process_output failed")?;
                 }
                 _ => {
                     log::trace!("Unhandled MFT event type: {event_type:?}");
@@ -278,7 +278,7 @@ impl H264Encoder {
 
     fn process_input(
         &mut self,
-        frame_source: &mut impl FnMut() -> ID3D11Texture2D)
+        frame_source: &mut impl FnMut() -> anyhow::Result<ID3D11Texture2D>)
         -> anyhow::Result<()> {
         // Throttle to target frame rate
         while SystemTime::now()
@@ -303,7 +303,7 @@ impl H264Encoder {
 
         // Create DXGI surface buffer from the caller's NV12 texture
         log::trace!("feeding frame to encoder...");
-        let frame_texture = frame_source();
+        let frame_texture = frame_source()?;
         // SAFETY: `frame_texture` is a valid NV12 `ID3D11Texture2D` from the caller.
         // The IID identifies the texture interface; subresource 0, not bottom-up.
         let buffer = api_call!(unsafe {

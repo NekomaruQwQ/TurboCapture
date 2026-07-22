@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 live-protocol = { workspace = true }
+live-shared-texture = { path = "../crates/live-shared-texture" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

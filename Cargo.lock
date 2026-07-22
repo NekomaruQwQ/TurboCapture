@@ -1384,6 +1384,7 @@ dependencies = [
  "clap",
  "enumerate-windows",
  "live-protocol",
+ "live-shared-texture",
  "log",
  "nkcore",
  "pretty-name",
@@ -1421,6 +1422,7 @@ dependencies = [
  "anyhow",
  "clap",
  "enumerate-windows",
+ "live-shared-texture",
  "log",
  "nkcore",
  "pretty_env_logger",
@@ -1451,6 +1453,18 @@ dependencies = [
  "tap",
  "tokio",
  "win32job",
+]
+
+[[package]]
+name = "live-shared-texture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "euclid",
+ "log",
+ "pretty_env_logger",
+ "windows 0.62.2",
 ]
 
 [[package]]

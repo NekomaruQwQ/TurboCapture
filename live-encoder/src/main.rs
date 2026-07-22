@@ -4,10 +4,11 @@
 //! `live-protocol` framed binary messages to stdout.  Pipe through
 //! `live-ws` for WebSocket delivery to the server.
 //!
-//! Three exclusive capture modes:
+//! Four exclusive input modes:
 //! - **Base** (default): scales the full window to `--width x --height`.
 //! - **Crop**: extracts an absolute subrect via `--crop-min-x/y --crop-max-x/y`.
 //! - **Auto**: (Phase 2) foreground polling + hot-swap capture session.
+//! - **Shared**: opens a supervisor-owned BGRA texture and encodes private copies.
 //!
 //! ## Usage
 //!
@@ -33,6 +34,7 @@ use live_encoder::{
 };
 
 use clap::Parser;
+use live_shared_texture::{AdapterLuid, SharedHandleValue};
 use nkcore::prelude::*;
 use nkcore::prelude::euclid::Size2D;
 
@@ -56,8 +58,7 @@ const DEFAULT_HEIGHT: u32 = 1200;
 #[derive(Parser)]
 #[command(name = "live-encoder")]
 struct CliArgs {
-    /// Capture mode: base (default), auto (foreground polling + hot-swap),
-    /// or crop (fixed subrect extraction).
+    /// Input mode: base (default), auto, crop, or shared texture.
     #[arg(long, value_parser = parse_capture_mode_arg, default_value = "base")]
     mode: CaptureModeArg,
 
@@ -109,6 +110,16 @@ struct CliArgs {
     #[arg(long)]
     info_url: Option<String>,
 
+    // ── Managed shared-texture mode ─────────────────────────────────────
+
+    /// Supervisor-owned NT shared-texture handle inherited by this process.
+    #[arg(long, requires = "adapter_luid")]
+    shared_handle: Option<SharedHandleValue>,
+
+    /// DXGI adapter LUID selected by the supervisor for the managed GPU cohort.
+    #[arg(long, requires = "shared_handle")]
+    adapter_luid: Option<AdapterLuid>,
+
     // ── Common args ───────────────────────────────────────────────────────
 
     /// Encoder frame rate (1-60).
@@ -127,14 +138,15 @@ struct CliArgs {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CaptureModeArg { Base, Auto, Crop }
+enum CaptureModeArg { Base, Auto, Crop, Shared }
 
 fn parse_capture_mode_arg(s: &str) -> Result<CaptureModeArg, String> {
     match s {
         "base" => Ok(CaptureModeArg::Base),
         "auto" => Ok(CaptureModeArg::Auto),
         "crop" => Ok(CaptureModeArg::Crop),
-        other => Err(format!("unknown mode '{other}' (expected 'base', 'auto', or 'crop')")),
+        "shared" => Ok(CaptureModeArg::Shared),
+        other => Err(format!("unknown mode '{other}' (expected 'base', 'auto', 'crop', or 'shared')")),
     }
 }
 
@@ -147,6 +159,8 @@ enum CaptureMode {
     Crop(CropBox),
     /// Auto-selector: foreground polling + hot-swap (resolution is fixed).
     Auto { width: u32, height: u32 },
+    /// Supervisor-owned shared BGRA input (resolution is fixed).
+    Shared { width: u32, height: u32 },
 }
 
 // ── CLI parsers ─────────────────────────────────────────────────────────────
@@ -182,6 +196,11 @@ fn parse_clear_color(s: &str) -> Result<[f32; 4], String> {
 
 /// Validate and resolve the CLI args into a `CaptureMode`.
 fn resolve_capture_mode(args: &CliArgs) -> anyhow::Result<CaptureMode> {
+    if args.mode != CaptureModeArg::Shared {
+        anyhow::ensure!(
+            args.shared_handle.is_none() && args.adapter_luid.is_none(),
+            "--shared-handle and --adapter-luid require --mode shared");
+    }
     match args.mode {
         CaptureModeArg::Auto => {
             let w = args.width.unwrap_or(DEFAULT_WIDTH);
@@ -211,6 +230,17 @@ fn resolve_capture_mode(args: &CliArgs) -> anyhow::Result<CaptureMode> {
                 w.is_multiple_of(16) && h.is_multiple_of(16),
                 "width and height must be multiples of 16 (got {w}x{h})");
             Ok(CaptureMode::Resample { width: w, height: h })
+        }
+        CaptureModeArg::Shared => {
+            let (Some(width), Some(height)) = (args.width, args.height) else {
+                anyhow::bail!("shared mode requires --width and --height");
+            };
+            anyhow::ensure!(args.shared_handle.is_some(), "shared mode requires --shared-handle");
+            anyhow::ensure!(args.adapter_luid.is_some(), "shared mode requires --adapter-luid");
+            anyhow::ensure!(
+                width.is_multiple_of(16) && height.is_multiple_of(16),
+                "width and height must be multiples of 16 (got {width}x{height})");
+            Ok(CaptureMode::Shared { width, height })
         }
     }
 }
@@ -278,25 +308,64 @@ fn main() {
         }
     };
 
-    let result = if let CaptureMode::Auto { width, height } = mode {
-        let config_url = args.config_url.unwrap_or_else(|| {
-            eprintln!("error: --mode auto requires --config-url");
-            std::process::exit(1);
-        });
-        let info_url = args.info_url.unwrap_or_else(|| {
-            eprintln!("error: --mode auto requires --info-url");
-            std::process::exit(1);
-        });
-        run_auto(width, height, args.fps, args.clear_color, config_url, info_url)
-    } else {
-        let hwnd = args.hwnd.expect("base/crop modes require --hwnd");
-        run(hwnd, mode, args.fps, args.clear_color)
+    let result = match mode {
+        CaptureMode::Auto { width, height } => {
+            let config_url = args.config_url.unwrap_or_else(|| {
+                eprintln!("error: --mode auto requires --config-url");
+                std::process::exit(1);
+            });
+            let info_url = args.info_url.unwrap_or_else(|| {
+                eprintln!("error: --mode auto requires --info-url");
+                std::process::exit(1);
+            });
+            run_auto(width, height, args.fps, args.clear_color, config_url, info_url)
+        }
+        CaptureMode::Shared { width, height } => run_shared(
+            width,
+            height,
+            args.fps,
+            args.shared_handle.expect("shared mode validates its handle"),
+            args.adapter_luid.expect("shared mode validates its adapter")),
+        legacy_mode => {
+            let hwnd = args.hwnd.expect("base/crop modes require --hwnd");
+            run(hwnd, legacy_mode, args.fps, args.clear_color)
+        }
     };
 
     if let Err(e) = result {
         eprintln!("fatal: {e}");
         std::process::exit(1);
     }
+}
+
+/// Encode a private copy of the supervisor-owned shared BGRA mailbox.
+fn run_shared(
+    width: u32,
+    height: u32,
+    frame_rate: u32,
+    shared_handle: SharedHandleValue,
+    adapter_luid: AdapterLuid) -> anyhow::Result<()> {
+    let frame_size = Size2D::new(width, height);
+    let bundle = live_shared_texture::create_device_on_adapter(adapter_luid, true)
+        .context("failed to create encoder device on supervisor-selected adapter")?;
+    log::info!(
+        "shared mode: input={}x{}, adapter={} ({})",
+        width,
+        height,
+        bundle.adapter_luid,
+        bundle.adapter_name);
+    let input = BgraTextureInput::from_shared(
+        bundle.device,
+        bundle.context,
+        shared_handle.into_owned(),
+        frame_size)?;
+    let encoding_handle = spawn_stdout_encoder(input, VideoEncoderConfig {
+        frame_rate,
+        bitrate: DEFAULT_BITRATE,
+    })?;
+    encoding_handle
+        .join()
+        .map_err(|_panic_payload| anyhow::anyhow!("encoding thread panicked"))?
 }
 
 #[expect(clippy::too_many_lines, reason = "main capture loop and encoding thread are necessarily long and complex")]
@@ -331,6 +400,7 @@ fn run(hwnd: isize, mode: CaptureMode, frame_rate: u32, clear_color: [f32; 4]) -
             (output, Some(crop))
         }
         CaptureMode::Auto { .. } => anyhow::bail!("auto mode should use run_auto()"),
+        CaptureMode::Shared { .. } => anyhow::bail!("shared mode should use run_shared()"),
     };
 
     let staging_bgra8 =

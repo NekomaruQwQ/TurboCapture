@@ -27,6 +27,7 @@ live-encoder/Cargo.toml                     human
 live-capture-youtube-music/Cargo.toml       human
 live-kpm/Cargo.toml                         human
 live-server/Cargo.toml                      human
+crates/live-shared-texture/Cargo.toml       human
 crates/enumerate-windows/Cargo.toml         human
 crates/set-dpi-awareness/Cargo.toml         human
 
@@ -36,6 +37,7 @@ ARCHIVE-1-StreamID.md                       agent
 M4-DESIGN.md                                agent
 PLAN-UI-AudioMeter.md                       agent
 PLAN-UI-KPMMeter.md                         agent
+PLAN-LIVE-STREAM.md                         agent
 README.md                                   agent
 README-Audio.md                             agent
 
@@ -59,12 +61,17 @@ src/main.rs                                 agent
 ## live-selector/
 src/main.rs                                 agent
 src/presenter.rs                            agent
+src/publisher.rs                            agent
 src/capture.rs                              agent
 src/d3d11.rs                                agent
 src/resample.rs                             human
 src/resample.hlsl                           human
 src/selector/mod.rs                         agent
 src/selector/config.rs                      agent
+
+## crates/live-shared-texture/
+src/lib.rs                                  agent
+src/bin/live-texture-proof.rs               agent
 
 ## live-capture-youtube-music/
 src/main.rs                                 agent

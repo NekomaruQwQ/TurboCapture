@@ -7,6 +7,7 @@
 mod capture;
 mod d3d11;
 mod presenter;
+mod publisher;
 mod resample;
 mod selector;
 
@@ -26,7 +27,9 @@ use nkcore::{
     os::windows::winit::{AppEvent, EventLoopExt as _},
     prelude::euclid::Size2D,
 };
+use live_shared_texture::{AdapterLuid, SharedHandleValue};
 use presenter::Presenter;
+use publisher::SharedPublisher;
 use windows::Win32::{
     Foundation::HWND,
     System::Com::{COINIT_MULTITHREADED, CoInitializeEx},
@@ -35,6 +38,7 @@ use winit::{
     dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::{ControlFlow, EventLoop},
+    platform::windows::WindowAttributesExtWindows as _,
     raw_window_handle::{HasWindowHandle as _, RawWindowHandle},
     window::{Window, WindowButtons},
 };
@@ -73,6 +77,14 @@ struct Args {
     /// Preview window title.
     #[arg(long, default_value = "Live Selector")]
     title: String,
+
+    /// Supervisor-owned NT shared-texture handle inherited by this process.
+    #[arg(long, requires = "adapter_luid")]
+    shared_handle: Option<SharedHandleValue>,
+
+    /// DXGI adapter LUID selected by the supervisor for the managed GPU cohort.
+    #[arg(long, requires = "shared_handle")]
+    adapter_luid: Option<AdapterLuid>,
 }
 
 /// Last selector target, retained so a failed WGC session can be recreated
@@ -120,6 +132,10 @@ fn run(args: Args) -> anyhow::Result<()> {
                         .with_title(args.title)
                         .with_inner_size(physical_size)
                         .with_resizable(false)
+                        // Winit's drag/drop path calls `OleInitialize` for STA,
+                        // which conflicts with the MTA required by WGC on this
+                        // thread. The preview has no file-drop behavior.
+                        .with_drag_and_drop(false)
                         .with_enabled_buttons(
                             WindowButtons::CLOSE |
                             WindowButtons::MINIMIZE))
@@ -127,8 +143,16 @@ fn run(args: Args) -> anyhow::Result<()> {
             let preview_hwnd =
                 hwnd_from_window(&window).expect("failed to obtain selector preview HWND");
             let presenter =
-                Presenter::new(preview_hwnd, output_size, CLEAR_COLOR)
+                Presenter::new(preview_hwnd, output_size, CLEAR_COLOR, args.adapter_luid)
                     .expect("failed to initialize selector preview presenter");
+            let publisher = args.shared_handle
+                .map(|handle| SharedPublisher::new(
+                    presenter.device(),
+                    presenter.device_context(),
+                    handle.into_owned(),
+                    output_size,
+                    CLEAR_COLOR)
+                    .expect("failed to initialize managed shared output"));
             let swap_rx = spawn_selector(SelectorConfig {
                 config_path: args.config,
                 ignored_hwnd: preview_hwnd.0 as isize,
@@ -143,6 +167,7 @@ fn run(args: Args) -> anyhow::Result<()> {
 
             let mut state = PreviewState {
                 presenter,
+                publisher,
                 swap_rx,
                 selected: None,
                 capture: None,
@@ -163,6 +188,8 @@ fn run(args: Args) -> anyhow::Result<()> {
 struct PreviewState {
     /// GPU presentation state, declared before `window` so it drops first.
     presenter: Presenter,
+    /// Optional non-blocking managed output using the presenter's adapter.
+    publisher: Option<SharedPublisher>,
     /// Selector updates consumed without blocking the window event loop.
     swap_rx: mpsc::Receiver<SelectorCommand>,
     /// Latest selected target retained across capture-session failures.
@@ -287,6 +314,16 @@ impl PreviewState {
             Ok(Some(frame)) => {
                 if let Err(error) = self.presenter.render(&frame.raw_texture, frame.size) {
                     log::error!("failed to render selector preview: {error:#}");
+                    event_loop.exit();
+                    return;
+                }
+                if let Some(publisher) = self.publisher.as_mut()
+                    && let Err(error) = publisher.publish(
+                        self.presenter.device(),
+                        self.presenter.device_context(),
+                        &frame.raw_texture,
+                        frame.size) {
+                    log::error!("failed to publish selector frame: {error:#}");
                     event_loop.exit();
                 }
             }

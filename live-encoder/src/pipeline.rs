@@ -17,13 +17,20 @@ use crate::{
 use live_protocol::{MessageType, flags, write_message};
 use live_protocol::avcc::serialize_avcc_payload;
 use live_protocol::video::{CodecParams, write_codec_params_payload, write_frame_payload};
+use live_shared_texture::{
+    AcquireStatus,
+    CONSUMER_KEY,
+    InheritedHandle,
+    OpenedMailbox,
+    PRODUCER_KEY,
+};
 
 use nkcore::prelude::*;
 use nkcore::prelude::euclid::Size2D;
 
 use std::io::{BufWriter, Write};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -31,6 +38,10 @@ use windows::Win32::System::Com::*;
 
 /// Codec bitrate retained from the legacy encoded-video producer.
 pub const DEFAULT_BITRATE: u32 = 8_000_000;
+/// Aggregation window for copy, conversion, and encoded-rate diagnostics.
+const METRICS_INTERVAL: Duration = Duration::from_secs(5);
+/// First-frame wait while the capture worker opens and seeds the mailbox.
+const FIRST_FRAME_TIMEOUT_MS: u32 = 10_000;
 
 /// Validated fixed-size BGRA texture consumed by the encoding pipeline.
 ///
@@ -40,8 +51,16 @@ pub const DEFAULT_BITRATE: u32 = 8_000_000;
 pub struct BgraTextureInput {
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
-    texture: ID3D11Texture2D,
+    source: BgraTextureSource,
     frame_size: Size2D<u32>,
+}
+
+/// Direct transitional input or cross-process latest-frame mailbox.
+enum BgraTextureSource {
+    /// Legacy capture and encoding threads share one in-process texture.
+    Direct(ID3D11Texture2D),
+    /// Managed mode copies the shared publication into a private texture.
+    Shared(SharedBgraInput),
 }
 
 impl BgraTextureInput {
@@ -65,9 +84,157 @@ impl BgraTextureInput {
         Ok(Self {
             device,
             device_context,
-            texture,
+            source: BgraTextureSource::Direct(texture),
             frame_size: expected_size,
         })
+    }
+
+    /// Open a supervisor-owned mailbox and allocate the encoder-private copy.
+    ///
+    /// The inherited handle closes after `OpenSharedResource1`; the opened
+    /// texture and keyed mutex retain independent COM references. The private
+    /// texture uses the same validated fixed-size BGRA contract as transitional
+    /// direct input.
+    pub fn from_shared(
+        device: ID3D11Device,
+        device_context: ID3D11DeviceContext,
+        handle: InheritedHandle,
+        expected_size: Size2D<u32>) -> anyhow::Result<Self> {
+        let mailbox = OpenedMailbox::open(&device, &handle, expected_size)?;
+        drop(handle);
+        let private_texture = d3d11::create_texture_2d(
+            &device,
+            expected_size,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &[D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_RENDER_TARGET])
+            .context("failed to create encoder-private BGRA texture")?;
+        let mut descriptor = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `private_texture` is live and `descriptor` is a stack-local out value.
+        unsafe { private_texture.GetDesc(&raw mut descriptor); }
+        validate_bgra_texture_descriptor(&descriptor, expected_size)?;
+
+        Ok(Self {
+            device,
+            device_context,
+            source: BgraTextureSource::Shared(SharedBgraInput {
+                mailbox,
+                private_texture,
+                has_frame: false,
+                metrics: CopyMetrics::new(),
+            }),
+            frame_size: expected_size,
+        })
+    }
+
+    /// Return the next private BGRA texture for conversion.
+    fn next_texture(&mut self) -> anyhow::Result<ID3D11Texture2D> {
+        match &mut self.source {
+            &mut BgraTextureSource::Direct(ref texture) => Ok(texture.clone()),
+            &mut BgraTextureSource::Shared(ref mut source) =>
+                source.copy_latest(&self.device_context),
+        }
+    }
+}
+
+/// Managed shared input with ownership bounded to one `CopyResource` submission.
+struct SharedBgraInput {
+    /// Open supervisor-owned texture and two-key mutex.
+    mailbox: OpenedMailbox,
+    /// Encoder-only copy used after the producer key is released.
+    private_texture: ID3D11Texture2D,
+    /// Whether a timeout can safely reuse a previously copied complete frame.
+    has_frame: bool,
+    /// Aggregated acquisition and copy-submission measurements.
+    metrics: CopyMetrics,
+}
+
+impl SharedBgraInput {
+    /// Copy the latest complete publication or reuse the prior private frame.
+    fn copy_latest(
+        &mut self,
+        context: &ID3D11DeviceContext) -> anyhow::Result<ID3D11Texture2D> {
+        let timeout_ms = if self.has_frame { 0 } else { FIRST_FRAME_TIMEOUT_MS };
+        match self.mailbox.mutex.acquire(CONSUMER_KEY, timeout_ms)? {
+            AcquireStatus::Timeout if self.has_frame => {
+                self.metrics.record_miss();
+                return Ok(self.private_texture.clone());
+            }
+            AcquireStatus::Timeout => {
+                anyhow::bail!(
+                    "capture worker did not publish the first shared frame within {FIRST_FRAME_TIMEOUT_MS} ms");
+            }
+            AcquireStatus::Abandoned => {
+                anyhow::bail!("shared texture keyed mutex was abandoned by the capture worker");
+            }
+            AcquireStatus::Acquired => {}
+        }
+
+        let started = Instant::now();
+        // SAFETY: Both textures belong to `context`'s adapter and have identical
+        // descriptors. `Flush` submits the private copy before key 0 is released.
+        unsafe { context.CopyResource(&self.private_texture, &self.mailbox.texture); }
+        // SAFETY: `context` is live and flushing has no pointer preconditions.
+        unsafe { context.Flush(); }
+        self.mailbox.mutex.release(PRODUCER_KEY)?;
+        self.has_frame = true;
+        self.metrics.record_copy(started.elapsed());
+        Ok(self.private_texture.clone())
+    }
+}
+
+/// Aggregated shared-copy measurements kept off individual frame logs.
+struct CopyMetrics {
+    /// Start of the current reporting interval.
+    started: Instant,
+    /// Successful shared-to-private copies.
+    copied: u64,
+    /// Consumer key misses that reused the previous private frame.
+    misses: u64,
+    /// CPU time spent submitting shared-to-private copies.
+    submission_time: Duration,
+}
+
+impl CopyMetrics {
+    /// Start an empty copy-metrics interval.
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            copied: 0,
+            misses: 0,
+            submission_time: Duration::ZERO,
+        }
+    }
+
+    /// Record a successful copy submission.
+    fn record_copy(&mut self, elapsed: Duration) {
+        self.copied += 1;
+        self.submission_time += elapsed;
+        self.report_if_due();
+    }
+
+    /// Record a non-blocking consumer miss.
+    fn record_miss(&mut self) {
+        self.misses += 1;
+        self.report_if_due();
+    }
+
+    /// Emit copy rate, misses, and average submission time every five seconds.
+    fn report_if_due(&mut self) {
+        let elapsed = self.started.elapsed();
+        if elapsed < METRICS_INTERVAL {
+            return;
+        }
+        let average_us = if self.copied == 0 {
+            0.0
+        } else {
+            self.submission_time.as_secs_f64() * 1_000_000.0 / self.copied as f64
+        };
+        log::info!(
+            "shared input: {:.1} copied fps, {} acquisition misses, {:.1} us average copy submission",
+            self.copied as f64 / elapsed.as_secs_f64(),
+            self.misses,
+            average_us);
+        *self = Self::new();
     }
 }
 
@@ -126,14 +293,17 @@ pub fn spawn_stdout_encoder(
 
     thread::Builder::new()
         .name("encoding".to_owned())
-        .spawn(move || run_stdout_encoder(&input, config))
+        .spawn(move || {
+            let mut input = input;
+            run_stdout_encoder(&mut input, config)
+        })
         .context("failed to spawn encoding thread")
 }
 
 /// Convert the validated BGRA input to NV12, encode it, and write framed AVCC.
 #[expect(clippy::exit, reason = "a closed stdout pipe deliberately terminates this stdout-first producer")]
 fn run_stdout_encoder(
-    input: &BgraTextureInput,
+    input: &mut BgraTextureInput,
     config: VideoEncoderConfig)
     -> anyhow::Result<()> {
     log::info!("encoding thread started");
@@ -165,14 +335,21 @@ fn run_stdout_encoder(
         bitrate: config.bitrate,
     }).context("failed to create H.264 encoder")?;
 
+    let mut conversion_metrics = StageMetrics::new("BGRA to NV12 conversion");
+    let mut output_metrics = FrameRateMetrics::new("encoded output");
+
     encoder.run(
         || {
+            let bgra_texture = input.next_texture()?;
+            let started = Instant::now();
             nv12_converter
-                .convert(&input.texture, &nv12_staging)
-                .expect("BGRA8 to NV12 conversion failed");
-            nv12_staging.clone()
+                .convert(&bgra_texture, &nv12_staging)
+                .context("BGRA8 to NV12 conversion failed")?;
+            conversion_metrics.record(started.elapsed());
+            Ok(nv12_staging.clone())
         },
         |nal_units| {
+            output_metrics.record();
             let timestamp_us = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -184,9 +361,81 @@ fn run_stdout_encoder(
                 // no consumer. Preserve the legacy clean exit used by launchers.
                 std::process::exit(0);
             }
-        });
+        })?;
 
     Ok(())
+}
+
+/// Average CPU submission time for one repeatedly invoked GPU stage.
+struct StageMetrics {
+    /// Human-readable stage name used in aggregate diagnostics.
+    name: &'static str,
+    /// Start of the current reporting interval.
+    started: Instant,
+    /// Number of invocations in this interval.
+    count: u64,
+    /// Accumulated CPU duration of those invocations.
+    total: Duration,
+}
+
+impl StageMetrics {
+    /// Start an empty interval for `name`.
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            started: Instant::now(),
+            count: 0,
+            total: Duration::ZERO,
+        }
+    }
+
+    /// Record one invocation and report its aggregate when due.
+    fn record(&mut self, duration: Duration) {
+        self.count += 1;
+        self.total += duration;
+        let elapsed = self.started.elapsed();
+        if elapsed < METRICS_INTERVAL {
+            return;
+        }
+        let average_us = self.total.as_secs_f64() * 1_000_000.0 / self.count as f64;
+        log::info!(
+            "{}: {:.1} fps, {:.1} us average CPU submission",
+            self.name,
+            self.count as f64 / elapsed.as_secs_f64(),
+            average_us);
+        *self = Self::new(self.name);
+    }
+}
+
+/// Output-rate counter separate from input timing to avoid shared closure state.
+struct FrameRateMetrics {
+    /// Human-readable counter name.
+    name: &'static str,
+    /// Start of the current reporting interval.
+    started: Instant,
+    /// Completed access units during this interval.
+    count: u64,
+}
+
+impl FrameRateMetrics {
+    /// Start an empty output-rate interval.
+    fn new(name: &'static str) -> Self {
+        Self { name, started: Instant::now(), count: 0 }
+    }
+
+    /// Count one access unit and report aggregate frames per second when due.
+    fn record(&mut self) {
+        self.count += 1;
+        let elapsed = self.started.elapsed();
+        if elapsed < METRICS_INTERVAL {
+            return;
+        }
+        log::info!(
+            "{}: {:.1} fps",
+            self.name,
+            self.count as f64 / elapsed.as_secs_f64());
+        *self = Self::new(self.name);
+    }
 }
 
 /// Stateful serializer for codec initialization and encoded access units.

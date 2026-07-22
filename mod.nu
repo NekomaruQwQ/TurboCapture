@@ -213,6 +213,32 @@ export def "run-capture auto" []: nothing -> nothing {
         --server     (get-url --ws "/internal/streams/main"))
 }
 
+# Exercise the Phase 3 supervisor-owned shared-texture path. The proof
+# executable owns the adapter and resource generation, while live-selector and
+# live-encoder remain independently built workers connected only by the
+# inherited texture handle. Its stdout stays protocol-framed and pipes directly
+# into live-ws like the transitional capture modes.
+export def --wrapped "run-capture shared" [--config: path, ...args]: nothing -> nothing {
+    # Resolve every interactive URL and build every child before constructing
+    # the media pipe so setup cannot strand a producer with no stdout reader.
+    get-url | ignore
+    let server_url = get-url --ws "/internal/streams/main"
+    let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
+    let selector_path = get-exe "live-selector" --copy "shared"
+    let encoder_path = get-exe "live-encoder" --copy "shared"
+    let proof_path = get-exe "live-texture-proof" --copy "shared"
+    let ws_path = get-exe "live-ws" --copy "shared"
+
+    ( ^$proof_path
+        --selector $selector_path
+        --encoder $encoder_path
+        --config $config_path
+        ...$args
+    | ^$ws_path
+        --mode video
+        --server $server_url)
+}
+
 # Start the YouTube Music crop capture pipeline.
 #
 # Uses `live-capture-youtube-music` which handles window discovery, DPI-aware

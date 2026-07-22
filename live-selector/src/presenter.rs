@@ -10,6 +10,7 @@ use crate::{
     resample::Resampler,
 };
 use nkcore::prelude::euclid::Size2D;
+use live_shared_texture::AdapterLuid;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::{
@@ -62,13 +63,14 @@ impl Presenter {
     pub fn new(
         hwnd: HWND,
         output_size: Size2D<u32>,
-        clear_color: [f32; 4]) -> anyhow::Result<Self> {
+        clear_color: [f32; 4],
+        adapter_luid: Option<AdapterLuid>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             output_size.width > 0 && output_size.height > 0,
             "preview dimensions must be non-zero");
 
         let (factory, device, device_context) =
-            d3d11::create_device().context("failed to create preview D3D11 device")?;
+            d3d11::create_device(adapter_luid).context("failed to create preview D3D11 device")?;
 
         let descriptor = DXGI_SWAP_CHAIN_DESC1 {
             Width: output_size.width,

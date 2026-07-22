@@ -350,7 +350,7 @@ the shared-texture proof.
 This rename frees the `live-capture` name while retaining the existing
 `live-selector` name and a comparable legacy path during development.
 
-### Phase 3 — Shared-texture proof
+### Phase 3 — Shared-texture proof (In Progress)
 
 - Create a minimal supervisor-owned shared texture on an explicitly selected
   adapter.
@@ -359,6 +359,26 @@ This rename frees the `live-capture` name while retaining the existing
 - Validate keyed-mutex recovery and inherited-handle lifetime.
 - Record acquisition misses, copy time, conversion time, and encoded frame rate
   in release builds.
+
+The implemented Phase 3 slice adds the internal `live-shared-texture` contract,
+managed `live-selector` publication, `live-encoder --mode shared`, and the
+temporary `live-texture-proof` owner. The owner selects one adapter, creates and
+retains an inheritable unnamed NT handle, launches only the two intended GPU
+workers, revokes further inheritance, and leaves encoder stdout attached directly
+to the caller's pipe. It intentionally does not implement Phase 4 restart policy,
+Job Object cleanup, selector synchronization, or stream metadata.
+
+A bounded 1920×1200/60 release run on the RTX 5090 Laptop GPU completed with
+75,050 bytes of unchanged `live-protocol` output, a 177.7 µs shared-to-private
+copy submission, 57.0 BGRA-to-NV12 submissions per second, and 56.9 encoded
+frames per second. That run exercised inherited-handle lifetime, initial clear
+publication, consumer misses with private-frame reuse, direct stdout wiring, and
+coupled normal shutdown with no remaining workers.
+
+Phase 3 remains in progress until an allowed live window exercises sustained
+producer publication and non-blocking producer misses, and fault injection
+confirms the raw `WAIT_ABANDONED` path terminates both workers as one invalid
+resource generation.
 
 ### Phase 4 — Introduce `live-stream`
 

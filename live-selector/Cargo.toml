@@ -7,6 +7,8 @@ edition = { workspace = true }
 workspace = true
 
 [dependencies]
+live-shared-texture = { path = "../crates/live-shared-texture" }
+
 anyhow = { workspace = true }
 clap = { workspace = true }
 enumerate-windows = { workspace = true }

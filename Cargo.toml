@@ -11,6 +11,7 @@ members = [
     "live-server",
     "live-ws",
     "crates/enumerate-windows",
+    "crates/live-shared-texture",
     "crates/set-dpi-awareness",
 ]
 

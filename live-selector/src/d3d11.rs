@@ -9,73 +9,29 @@ use nkcore::debug::*;
 use nkcore::prelude::*;
 use nkcore::*;
 
-use windows::core::Interface as _;
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::*;
 
-/// Create a D3D11 device on the highest-performance GPU adapter.
+use live_shared_texture::AdapterLuid;
+
+/// Create a D3D11 device on an explicit managed adapter or the standalone default.
 ///
 /// BGRA support is required by WGC and the preview swap chain. Unlike the
 /// streaming device, this preview-owned device does not request video-processor
-/// support because it never converts to NV12. Multithread protection keeps WGC
-/// and presentation access safe if their scheduling diverges internally.
-pub fn create_device() -> anyhow::Result<(IDXGIFactory6, ID3D11Device, ID3D11DeviceContext)> {
-    // SAFETY: No preconditions; creates a new DXGI factory COM object.
-    let dxgi_factory =
-        api_call!(unsafe { CreateDXGIFactory::<IDXGIFactory6>() })?;
-    // SAFETY: `dxgi_factory` is a valid COM object from the line above.
-    let dxgi_adapter =
-        api_call!(unsafe {
-            dxgi_factory.EnumAdapterByGpuPreference::<IDXGIAdapter>(
-                0,
-                DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE)
-        })?;
-
-    let DXGI_ADAPTER_DESC { Description: adapter_name, .. } =
-        // SAFETY: `dxgi_adapter` is a valid COM object obtained above.
-        api_call!(unsafe { dxgi_adapter.GetDesc() })?;
-    // SAFETY: `adapter_name` is a null-terminated wide string from `DXGI_ADAPTER_DESC`.
-    let adapter_name =
-        unsafe { widestring::U16CString::from_ptr_str(adapter_name.as_ptr()) }
-            .to_string_lossy();
-    log::info!("device: {adapter_name}");
-
-    let mut device = None;
-    let mut device_context = None;
-    // SAFETY: `dxgi_adapter` is valid. Output pointers are stack-local `Option`s
-    // initialized to `None`; D3D11 writes into them on success.
-    api_call!(unsafe {
-        D3D11CreateDevice(
-            &dxgi_adapter,
-            D3D_DRIVER_TYPE_UNKNOWN,
-            HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT |
-            cfg!(debug_assertions)
-                .then_some(D3D11_CREATE_DEVICE_DEBUG)
-                .unwrap_or_default(),
-            Some(&[D3D_FEATURE_LEVEL_11_0]),
-            D3D11_SDK_VERSION,
-            Some(&raw mut device),
-            None,
-            Some(&raw mut device_context))
-    })?;
-
-    let device =
-        device
-            .ok_or_else(|| anyhow::anyhow!("failed to create D3D11 device"))?;
-    let device_context =
-        device_context
-            .ok_or_else(|| anyhow::anyhow!("failed to create D3D11 device context"))?;
-
-    // SAFETY: Every D3D11 device implements `ID3D11Multithread`; the interface
-    // remains valid because it owns a COM reference to `device`.
-    let multithread = api_call!(unsafe { device.cast::<ID3D11Multithread>() })?;
-    // SAFETY: `multithread` is a valid interface obtained from the cast above.
-    let _ = unsafe { multithread.SetMultithreadProtected(true) };
-
-    Ok((dxgi_factory, device, device_context))
+/// support because it never converts to NV12. Managed output must pass the
+/// supervisor's LUID; standalone preview selects the highest-performance GPU.
+/// Multithread protection keeps WGC and presentation access safe if their
+/// scheduling diverges internally.
+pub fn create_device(
+    adapter_luid: Option<AdapterLuid>)
+    -> anyhow::Result<(IDXGIFactory6, ID3D11Device, ID3D11DeviceContext)> {
+    let bundle = if let Some(adapter_luid) = adapter_luid {
+        live_shared_texture::create_device_on_adapter(adapter_luid, false)?
+    } else {
+        live_shared_texture::create_high_performance_device(false)?
+    };
+    log::info!("device: {} ({})", bundle.adapter_name, bundle.adapter_luid);
+    Ok((bundle.factory, bundle.device, bundle.context))
 }
 
 /// Create a default-format shader resource view for a captured 2D texture.
