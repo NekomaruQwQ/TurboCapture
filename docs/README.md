@@ -19,6 +19,7 @@
 - **[Milestones](#milestones)**
 - **[Architecture](#architecture)** — components, principles, file ownership
   - [Microservice Design](#microservice-design)
+  - [Live Stream Refactor](#live-stream-refactor-planned)
   - [Design Principles](#design-principles)
   - [Orchestration](#orchestration)
 - **[Communication](#communication)** — wire protocol, HTTP/WS endpoints, CLI
@@ -59,6 +60,11 @@ This project is not semantically versioned. Instead, we track **milestones** (Mx
 ### Microservice Design
 
 M4 splits the system into independently runnable components connected via stdout pipes and WebSocket.  Producers (`live-capture`, `live-audio`, `live-kpm`) write binary frames to stdout using the `live-protocol` framing format.  `live-ws` reads stdin and relays each message as a WS binary message to the server.  The server is a thin Rust relay — no process management, no circular buffering.
+
+The diagram below describes the current implementation. The video path is now
+being split further so safe window selection, GPU capture, encoding, and stream
+supervision can evolve behind explicit process boundaries; see
+[Live Stream Refactor](#live-stream-refactor-planned).
 
 ```mermaid
 graph LR
@@ -118,6 +124,74 @@ graph LR
 | **Server** | Rust (Axum) | WS relay, string store, config | WS ↔ WS, HTTP |
 | **Frontend** | Svelte 5 + Vite | Viewer UI | WS (video, audio, events) |
 | **`live-app`** | Rust (wry) | Optional webview host | — |
+
+### Live Stream Refactor (Planned)
+
+`live-selector` was branched from `live-capture` to isolate safe window
+selection and let its matching, capture, resampling, and preview behavior evolve
+without coupling those experiments to the encoded video path. The branch is not
+intended to remain merely a preview-specific duplicate. It is the starting point
+for a reusable, standalone safe-capture program.
+
+The target architecture gives the current responsibilities clearer names:
+
+- **`live-capture`** — the current `live-selector` lineage. It reads a local
+  selector profile configuration, chooses only allowed foreground windows,
+  captures and resamples them, and either presents a standalone preview or
+  publishes into a shared D3D11 texture. This binary remains independently useful
+  for safe screen sharing without the livestream pipeline.
+- **`live-encoder`** — the encoding lineage extracted from the current
+  `live-capture`. It reads a fixed-size shared GPU texture, converts BGRA to NV12,
+  encodes H.264, and writes `live-protocol` messages to stdout. It does not know
+  about HWNDs, selector profiles, or capture modes.
+- **`live-stream`** — a new supervisor for a complete video stream. It owns
+  stream modes, DXGI adapter selection, shared-texture creation, configuration
+  synchronization, child lifetimes, and the `live-encoder | live-ws` pipe.
+- **`live-ws`** — remains the transport worker and owns WebSocket reconnection.
+
+```mermaid
+flowchart LR
+    config["selector TOML<br/>enabled safety profiles"]
+
+    subgraph capture_process["live-capture"]
+        selector["foreground selection<br/>WGC + resampling"]
+        preview["optional local preview"]
+    end
+
+    subgraph stream_process["live-stream supervisor"]
+        texture["fixed-size shared<br/>BGRA texture"]
+        encoder["live-encoder<br/>NV12 + H.264"]
+        ws["live-ws"]
+    end
+
+    config --> selector
+    selector --> preview
+    selector --> texture
+    texture --> encoder
+    encoder -- "stdout" --> ws
+    ws -- "WebSocket" --> server["live-server"]
+```
+
+`live-capture` and `live-encoder` do not launch, configure, or depend on each
+other. In the managed pipeline, `live-stream` creates the shared texture and
+passes its handle to both workers. In standalone use, `live-capture` creates its
+own presentation resources and needs only the selector config and output size.
+
+The migration keeps the existing `live-selector` name until final cutover. The
+current `live-capture` tree is renamed to `live-encoder` first, before it is
+simplified, so `jj` can preserve and display its lineage instead of treating the
+encoder as an unrelated new program. Only after that pipeline is proven does
+`live-selector` take the freed `live-capture` name.
+
+Selector policy deliberately stays in `live-capture`: it is the safety boundary,
+not a low-level resolved-HWND worker. Stream modes stay in `live-stream`, where
+they determine topology and orchestration without changing the meaning of the
+capture profile file.
+
+The migration is intentionally incremental so the current video pipeline remains
+available until shared-texture transport and supervision are proven. See
+[`PLAN-LIVE-STREAM.md`](PLAN-LIVE-STREAM.md) for contracts, safety semantics,
+failure recovery, performance gates, and the phased cutover.
 
 ### Why This Design?
 
@@ -688,7 +762,8 @@ LiveUI/
 │
 ├── docs/
 │   ├── README.md                    # This document
-│   └── M4-DESIGN.md                # M4 architecture design & journey
+│   ├── M4-DESIGN.md                # M4 architecture design & journey
+│   └── PLAN-LIVE-STREAM.md         # Planned capture/video/supervisor split
 │
 ├── data/                            # Persisted runtime data (gitignored)
 │   ├── strings.json                 # String store key-value pairs
