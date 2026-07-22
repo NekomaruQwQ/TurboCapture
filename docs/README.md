@@ -2,7 +2,7 @@
 
 **Nekomaru's livestreaming infrastructure.**
 
-**Last Updated**: 2026-07-21
+**Last Updated**: 2026-07-22
 
 ---
 
@@ -59,7 +59,7 @@ This project is not semantically versioned. Instead, we track **milestones** (Mx
 
 ### Microservice Design
 
-M4 splits the system into independently runnable components connected via stdout pipes and WebSocket.  Producers (`live-capture`, `live-audio`, `live-kpm`) write binary frames to stdout using the `live-protocol` framing format.  `live-ws` reads stdin and relays each message as a WS binary message to the server.  The server is a thin Rust relay — no process management, no circular buffering.
+M4 splits the system into independently runnable components connected via stdout pipes and WebSocket.  Producers (`live-encoder`, `live-audio`, `live-kpm`) write binary frames to stdout using the `live-protocol` framing format.  `live-ws` reads stdin and relays each message as a WS binary message to the server.  The server is a thin Rust relay — no process management, no circular buffering.
 
 The diagram below describes the current implementation. The video path is now
 being split further so safe window selection, GPU capture, encoding, and stream
@@ -69,8 +69,8 @@ supervision can evolve behind explicit process boundaries; see
 ```mermaid
 graph LR
     subgraph producers["Rust Producers (stdout)"]
-        capture_auto["<b>live-capture</b><br/>--mode auto (main)<br/>GPU capture → NVENC<br/>→ AVCC → stdout"]
-        capture_youtube_music["<b>live-capture-youtube-music</b><br/>window finder + DPI crop<br/>spawns live-capture --mode crop<br/>→ stdout"]
+        capture_auto["<b>live-encoder</b><br/>legacy --mode auto (main)<br/>GPU capture → NVENC<br/>→ AVCC → stdout"]
+        capture_youtube_music["<b>live-capture-youtube-music</b><br/>window finder + DPI crop<br/>spawns live-encoder --mode crop<br/>→ stdout"]
         audio["<b>live-audio</b><br/>WASAPI shared-mode<br/>s16le PCM → stdout"]
         kpm["<b>live-kpm</b><br/>WH_KEYBOARD_LL hook<br/>Sliding window KPM<br/>→ stdout"]
     end
@@ -114,8 +114,8 @@ graph LR
 | Component | Language | Role | I/O |
 |-----------|----------|------|-----|
 | **`live-protocol`** | Rust (lib) | Shared 8-byte frame header + AVCC helpers + audio payloads | Used by all Rust crates |
-| **`live-capture`** | Rust | GPU capture + NVENC encode | stdout (live-protocol framed) |
-| **`live-capture-youtube-music`** | Rust | YouTube Music window finder + DPI-aware crop + auto-restart wrapper around `live-capture` | stdout (live-protocol framed) |
+| **`live-encoder`** | Rust | Transitional legacy capture CLI plus extracted BGRA → NV12 → H.264 → stdout pipeline | BGRA texture → live-protocol framed stdout |
+| **`live-capture-youtube-music`** | Rust | YouTube Music window finder + DPI-aware crop + auto-restart wrapper around legacy `live-encoder --mode crop` | stdout (live-protocol framed) |
 | **`live-audio`** | Rust | WASAPI audio capture → s16le PCM | stdout (live-protocol framed) |
 | **`live-selector`** | Rust | Local profile-driven safe-capture preview | TOML policy + WGC → fixed-size D3D11 window |
 | **`live-ws`** | Rust | stdin → WS relay (modes: default, video, audio) | stdin → WS binary messages |
@@ -178,8 +178,8 @@ passes its handle to both workers. In standalone use, `live-capture` creates its
 own presentation resources and needs only the selector config and output size.
 
 The migration keeps the existing `live-selector` name until final cutover. The
-current `live-capture` tree is renamed to `live-encoder` first, before it is
-simplified, so `jj` can preserve and display its lineage instead of treating the
+original `live-capture` tree has been renamed to `live-encoder` before being
+simplified, so `jj` preserves and displays its lineage instead of treating the
 encoder as an unrelated new program. Only after that pipeline is proven does
 `live-selector` take the freed `live-capture` name.
 
@@ -197,7 +197,7 @@ failure recovery, performance gates, and the phased cutover.
 
 | Concern | Decision | Rationale |
 |---------|----------|-----------|
-| GPU capture + encoding | Rust (`live-capture`) | Requires `unsafe` Windows APIs, hardware access, zero-copy GPU pipelines. |
+| GPU capture + encoding | Rust (`live-selector` + transitional `live-encoder`) | Requires `unsafe` Windows APIs, hardware access, zero-copy GPU pipelines. |
 | Network transport | `live-ws` (separate binary) | Producers have one code path (stdout). No WS client, no reconnect logic in capture code. `live-ws` handles all networking. |
 | Audio capture | Rust (`live-audio`, standalone) | WASAPI shared-mode loopback, MMCSS priority, s16le PCM.  Stdout-first — piped through `live-ws --mode audio`. |
 | Keystroke counting | Rust (`live-kpm`, standalone) | `WH_KEYBOARD_LL` hook on a dedicated message pump thread. Privacy-by-design. |
@@ -230,8 +230,8 @@ The system uses **fixed, well-known stream IDs** rather than dynamically generat
 
 | Stream ID | Producer | Purpose |
 |-----------|----------|---------|
-| `"main"` | `live-capture --mode auto` | Foreground window (auto-selector) |
-| `"youtube-music"` | `live-capture --mode crop` | YouTube Music playback bar |
+| `"main"` | `live-encoder --mode auto` | Foreground window (transitional auto-selector) |
+| `"youtube-music"` | `live-encoder --mode crop` | YouTube Music playback bar |
 
 **Why fixed IDs?**  The frontend is a pure viewer — it has zero stream management logic.  It renders `"main"` unconditionally and shows `"youtube-music"` when available (polled via `GET /api/streams`).  No discovery protocol, no negotiation, no dynamic allocation.  When the auto-selector hot-swaps the captured window, the stream ID stays `"main"` — the server sends fresh CodecParams and a keyframe, and the frontend reinitializes its decoder.
 
@@ -245,7 +245,7 @@ These principles guide M4 development and operation.
 
 2. **Stateless Executables.**  Each component gets all configuration from CLI args and HTTP.  No stdin commands, no dynamic reconfiguration.  Exception: `--mode auto` polls config from the server (read-only HTTP).
 
-3. **Stdout-First Producers.**  `live-capture`, `live-audio`, and `live-kpm` write to stdout via `live-protocol` framing.  Zero networking dependencies.  `> dump.bin` IS the production code path.
+3. **Stdout-First Producers.**  `live-encoder`, `live-audio`, and `live-kpm` write to stdout via `live-protocol` framing.  Zero networking dependencies.  `> dump.bin` IS the production code path.
 
 4. **Independently Runnable.**  Every component can run standalone.  No component assumes it was spawned by another.  Server runs with or without any workers connected.
 
@@ -296,7 +296,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `run-app` | Launch `live-app` webview (builds + copies via `get-exe`) |
 | `run-selector [--config path]` | Launch the fixed-size local profile preview; defaults to ignored `data/selector-new.toml` |
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
-| `run-capture auto` | Launch the auto-selector pipeline (`live-capture \| live-ws`) |
+| `run-capture auto` | Launch the transitional auto-selector pipeline (`live-encoder \| live-ws`) |
 | `run-capture youtube-music` | Launch `live-capture-youtube-music \| live-ws` pipeline |
 | `run-audio [device]` | Launch the audio pipeline (`live-audio \| live-ws --mode audio`) |
 | `run-kpm` | Launch the KPM pipeline (`live-kpm \| live-ws`) |
@@ -306,7 +306,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 
 Each `[[compile]]` shader entry may declare `dependencies = ["common.hlsli", ...]` as exact paths relative to its HLSL source directory. The field may be omitted when the shader has no includes. `compile-shaders` invokes `fxc` only when the output is missing or older than the main HLSL source or any declared dependency; missing dependencies are reported as manifest errors.
 
-Every binary invocation goes through `get-exe`, which runs `cargo build --release --bin <name>` to ensure the binary is up-to-date.  Binaries that may run concurrently across launchers (`live-capture`, `live-selector`, `live-ws`, `live-app`) use `get-exe --copy <id>` to copy the exe before spawning — this prevents file locking from blocking subsequent builds on Windows.
+Every binary invocation goes through `get-exe`, which runs `cargo build --release --bin <name>` to ensure the binary is up-to-date.  Binaries that may run concurrently across launchers (`live-encoder`, `live-selector`, `live-ws`, `live-app`) use `get-exe --copy <id>` to copy the exe before spawning — this prevents file locking from blocking subsequent builds on Windows.
 
 ---
 
@@ -347,7 +347,7 @@ Sent for every encoded frame. `is_keyframe` is in the header `flags` field, not 
 [u64 LE: timestamp_us][avcc bytes]
 ```
 
-The AVCC payload is pre-built by `live-capture` — concatenated length-prefixed NAL units (4-byte BE length + raw NAL data, no Annex B start codes). Directly feedable to `EncodedVideoChunk`.
+The AVCC payload is pre-built by `live-encoder` — concatenated length-prefixed NAL units (4-byte BE length + raw NAL data, no Annex B start codes). Directly feedable to `EncodedVideoChunk`.
 
 ##### `0x10` — KpmUpdate
 
@@ -397,23 +397,28 @@ live-audio --device "..." | live-ws --mode audio --server ws://host:3000/interna
 live-audio --device "..." > dump.bin
 ```
 
-### live-capture CLI
+### live-encoder CLI (Transitional)
+
+During the refactor, `live-encoder` retains the old direct-capture modes for
+end-to-end comparison. Its encoding-owned path now begins at a validated fixed-
+size BGRA texture boundary; Phase 3 replaces the in-process producer with a
+private copy from the supervisor-owned shared texture.
 
 ```bash
 # Base mode — capture + encode to stdout
-live-capture --hwnd 0x1A2B --width 1920 --height 1200
+live-encoder --hwnd 0x1A2B --width 1920 --height 1200
 
 # Auto mode — foreground polling + hot-swap
-live-capture --mode auto --width 1920 --height 1200 \
+live-encoder --mode auto --width 1920 --height 1200 \
   --config-url http://host/api/selector/config \
   --info-url http://host/internal/streams/main/info
 
 # Crop mode — fixed subrect extraction
-live-capture --mode crop --hwnd 0x1A2B \
+live-encoder --mode crop --hwnd 0x1A2B \
   --crop-min-x 0 --crop-min-y 600 --crop-max-x 1920 --crop-max-y 700 --fps 15
 
 # Dump to file (production code path — same output format)
-live-capture --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
+live-encoder --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
 ```
 
 ### live-selector CLI
@@ -438,7 +443,7 @@ The preview excludes its own HWND from selector matching. Focusing the preview
 therefore keeps the last valid selected window instead of recursively capturing
 itself.
 
-`live-selector` intentionally does not depend on `live-capture`. The two crates
+`live-selector` intentionally does not depend on `live-encoder`. The two crates
 own separate selector, WGC, D3D11, resampler, and HLSL implementations. They
 start with equivalent matching and scaling behavior, but changes to preview
 filtering or interaction do not create compatibility obligations for encoded
@@ -538,7 +543,7 @@ Server-managed key-value store. Keys prefixed with `$` are **computed strings** 
 
 ##### Selector Config
 
-The server stores the selector config; `live-capture --mode auto` polls it.
+The server stores the selector config; transitional `live-encoder --mode auto` polls it.
 
 **`GET /api/selector/config`** — Full preset config (polled by auto mode every ~20s).
 
@@ -568,7 +573,7 @@ The server stores the selector config; `live-capture --mode auto` polls it.
 
 ##### Stream Info
 
-**`POST /internal/streams/:streamId/info`** — Periodic capture metadata from `live-capture --mode auto` (every ~2s). Updates computed strings.  On window swaps, the selector queues a swap-tagged POST *before* dispatching the swap to the capture pipeline; a dedicated poster worker in `live-capture` handles the actual HTTP request so a slow or unreachable server never freezes the polling loop — see [Strings-Gated Keys](#strings-gated-keys-main-stream).
+**`POST /internal/streams/:streamId/info`** — Periodic capture metadata from transitional `live-encoder --mode auto` (every ~2s). Updates computed strings.  On window swaps, the selector queues a swap-tagged POST *before* dispatching the swap to the capture pipeline; a dedicated poster worker in `live-encoder` handles the actual HTTP request so a slow or unreachable server never freezes the polling loop — see [Strings-Gated Keys](#strings-gated-keys-main-stream).
 
 ```json
 {
@@ -585,11 +590,11 @@ The server stores the selector config; `live-capture --mode auto` polls it.
 
 ### Encoding Pipeline Reference
 
-#### Format Converter (`live-capture/src/converter.rs`)
+#### Format Converter (`live-encoder/src/converter.rs`)
 
 GPU-accelerated BGRA→NV12 conversion via `ID3D11VideoProcessor`. Hardware H.264 encoders require NV12 input. Performance: ~0.5-1ms for 1920x1200.
 
-#### H.264 Encoder (`live-capture/src/encoder.rs`)
+#### H.264 Encoder (`live-encoder/src/encoder.rs`)
 
 Async Media Foundation Transform (MFT). Runs a blocking event loop:
 
@@ -600,14 +605,14 @@ NAL unit types: SPS(7) ~27B, PPS(8) ~8B, IDR(5) ~67KB, NonIDR(1) ~1.5-30KB.
 
 #### "Bakery Model" (Capture Thread ↔ Encoding Thread)
 
-Within `live-capture`, the capture thread (main) and encoding thread share a staging texture ("the shelf"). The capture thread continuously restocks it with the latest captured frame; the encoding thread reads at a constant 60fps. No channels, no CPU copies — just a shared GPU texture with `Flush()` synchronization.
+Within transitional `live-encoder`, the capture thread (main) and encoding thread share a staging texture ("the shelf"). The capture thread continuously restocks it with the latest captured frame; the encoding pipeline validates that fixed-size BGRA input before converting and reading at a constant 60fps. No channels or CPU copies are introduced. Phase 3 replaces this same-process handoff with a keyed-mutex shared texture and an encoder-private GPU copy.
 
 In **auto mode**, the capture session can be hot-swapped without restarting the encoder. The staging texture dimensions are fixed (set at startup), so the encoder's input format never changes. On window switch, only the `CaptureSession` is replaced.
 
 
 ### Capture Modes
 
-`live-capture` supports three modes via `--mode`:
+The transitional `live-encoder` CLI supports three legacy modes via `--mode`:
 
 - **`base`** (default): captures a specific window by HWND, resamples to `--width x --height`.
 - **`auto`**: foreground polling + pattern matching + hot-swap capture session. The encoder never restarts — only the `CaptureSession` is replaced on window switch.
@@ -630,7 +635,7 @@ M4's microservice design enables splitting components across machines.  Each pro
 
 ```
 Machine A (streaming):  server + live-capture-youtube-music + YouTube Music + OBS + live-app
-Machine B (working):    live-capture --mode auto (main) + live-kpm
+Machine B (working):    live-encoder --mode auto (main) + live-kpm
 ```
 
 - YouTube Music audio: OBS captures system audio directly on Machine A.  Zero network audio transfer.
@@ -687,7 +692,7 @@ The `<StreamRenderer>` component accepts `colorKey?: string | string[]` (up to 8
 
 #### Strings-Gated Keys (Main Stream)
 
-For the main stream, the active key set is selected dynamically in `App.svelte` from the `$captureInfo` / `$liveMode` strings posted by the auto-selector — so the keys track the captured app (e.g. VS Code's dark UI greys for the `code` mode).  To keep this in sync with the video, the selector queues a swap-tagged stream-info POST *before* dispatching the swap command to the capture loop.  A small `selector-poster` worker thread (one per `live-capture` process) drains the queue over a keep-alive `ureq::Agent` and coalesces stale heartbeats; the selector itself never blocks on HTTP, so a slow or unreachable server can't pause window matching.  Strict synchronous ordering relaxes to best-effort by latency margin — localhost POST + WS broadcast (~5–15 ms) almost always lands at the frontend ahead of the first new-window frame clearing the capture + NVENC + WS pipeline (~20–60 ms).  Documented at the top of `live-capture/src/selector/mod.rs`.
+For the main stream, the active key set is selected dynamically in `App.svelte` from the `$captureInfo` / `$liveMode` strings posted by the auto-selector — so the keys track the captured app (e.g. VS Code's dark UI greys for the `code` mode).  To keep this in sync with the video, the selector queues a swap-tagged stream-info POST *before* dispatching the swap command to the capture loop.  A small `selector-poster` worker thread (one per transitional `live-encoder` process) drains the queue over a keep-alive `ureq::Agent` and coalesces stale heartbeats; the selector itself never blocks on HTTP, so a slow or unreachable server can't pause window matching.  Strict synchronous ordering relaxes to best-effort by latency margin — localhost POST + WS broadcast (~5–15 ms) almost always lands at the frontend ahead of the first new-window frame clearing the capture + NVENC + WS pipeline (~20–60 ms).  Documented at the top of `live-encoder/src/selector/mod.rs`.
 
 ### Widgets
 
@@ -779,7 +784,7 @@ LiveUI/
 │       ├── avcc.rs                  # Annex B → AVCC conversion, codec string, avcC builder
 │       └── video.rs                 # CodecParams + Frame payload serialization
 │
-├── live-capture/                    # GPU capture + H.264 encode → stdout (Rust)
+├── live-encoder/                    # Transitional capture CLI + extracted encoder (Rust)
 │   └── src/
 │       ├── lib.rs                   # NALUnit/NALUnitType types, module re-exports
 │       ├── main.rs                  # CLI: --mode base|auto|crop, capture loop, encoding thread
@@ -788,6 +793,7 @@ LiveUI/
 │       ├── d3d11.rs                 # D3D11 device, texture, RTV/SRV helpers
 │       ├── encoder.rs               # NVENC H.264 async MFT
 │       ├── encoder/                 # NVENC helpers (debug, finder)
+│       ├── pipeline.rs              # Validated BGRA input → NV12/NVENC/AVCC/stdout boundary
 │       ├── resample.rs + .hlsl      # GPU fullscreen quad resampler
 │       └── selector/                # Auto-selector (foreground polling, pattern matching)
 │           ├── mod.rs               # Selector thread + non-blocking poster worker (keep-alive POSTs, swap-aware coalescing)
@@ -894,7 +900,7 @@ LiveUI/
 
 ### Bug #4: Sync HTTP POST Stalled the Selector Polling Loop
 
-**Problem**: `live-capture --mode auto` ran its 2 s stream-info POST synchronously in the same thread that polled the foreground window.  When the server slowed or went away, ureq's blocking timeout froze the entire selector tick — pattern matching paused, swap dispatch paused.  The synchronous call also doubled as the enforcement mechanism for the strings-gated-keys ordering invariant ("title arrives at server before new-window frames"), so it couldn't simply be made async without thinking about ordering.
+**Problem**: the legacy auto mode (now `live-encoder --mode auto`) ran its 2 s stream-info POST synchronously in the same thread that polled the foreground window.  When the server slowed or went away, ureq's blocking timeout froze the entire selector tick — pattern matching paused, swap dispatch paused.  The synchronous call also doubled as the enforcement mechanism for the strings-gated-keys ordering invariant ("title arrives at server before new-window frames"), so it couldn't simply be made async without thinking about ordering.
 
 **Fix**: Spawn a dedicated `selector-poster` worker thread that owns a `ureq::Agent` (HTTP keep-alive) and drains an `mpsc` channel.  The selector enqueues swap-tagged tasks before dispatching swap commands; the worker preserves swap order and coalesces stale heartbeats so a recovered server isn't flooded.  Strict ordering relaxes to best-effort by latency margin — localhost POST + WS broadcast (~5–15 ms) almost always wins against capture + NVENC + WS (~20–60 ms), so the flicker stays absent in practice.
 

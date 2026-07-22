@@ -1,7 +1,8 @@
 //! Preview-owned Windows Graphics Capture types and viewport calculation.
 //!
 //! This module intentionally mirrors the initial implementation forked from
-//! `live-capture`, but it belongs exclusively to `live-selector` so preview
+//! the original `live-capture` lineage (now `live-encoder`), but it belongs
+//! exclusively to `live-selector` so preview
 //! sizing and capture behavior can evolve without changing the stream encoder.
 
 pub use winrt_capture::CaptureSession;

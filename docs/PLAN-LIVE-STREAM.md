@@ -1,6 +1,6 @@
 # Live Stream Pipeline Refactor
 
-**Status:** In progress — Phase 1 complete
+**Status:** In progress — Phase 2 complete
 
 ## Purpose
 
@@ -326,18 +326,26 @@ the current end-to-end behavior remains available during migration.
   case-variant configurations.
 - Keep the current fixed-size preview as the standalone validation surface.
 
-### Phase 2 — Rename and extract `live-encoder`
+### Phase 2 — Rename and extract `live-encoder` (Complete)
 
 - Mechanically rename the current `live-capture` tree, package, and binary to
   `live-encoder` before major structural edits.
 - Confirm that `jj` reports the existing files as moved rather than an unrelated
   deletion and addition.
 - Temporarily retain the legacy capture CLI as needed for end-to-end comparison.
-- Move the private BGRA staging, NV12 conversion, NVENC, AVCC, and stdout framing
-  responsibilities behind a shared-texture input boundary.
+- Move NV12 conversion, NVENC, AVCC, and stdout framing behind a validated,
+  fixed-size BGRA texture input boundary. Shared-handle opening, keyed-mutex
+  acquisition, and the private consumer copy remain the Phase 3 proof.
 - Preserve the current codec settings and stdout wire format.
 - Verify that existing viewers and `live-ws --mode video` cannot distinguish the
   new encoder worker from the current producer.
+
+The extracted input boundary has release-mode descriptor-validation coverage;
+the protocol writer covers CodecParams and Frame ordering, SPS/PPS retention,
+keyframe flags, timestamps, and AVCC payloads.
+The transitional launchers now invoke `live-encoder`, while its legacy
+`base|auto|crop` capture modes remain available for hardware comparison during
+the shared-texture proof.
 
 This rename frees the `live-capture` name while retaining the existing
 `live-selector` name and a comparable legacy path during development.

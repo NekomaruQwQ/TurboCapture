@@ -94,7 +94,7 @@ fn get_frame_offset(hwnd: HWND, window_rect: &RECT) -> anyhow::Result<Vector2D<u
 /// coordinates (`GetWindowRect` space).
 ///
 /// Returns a `Box2D<u32>` with min (inclusive) / max (exclusive) corners
-/// suitable for passing to `live-capture --crop-min-x/y --crop-max-x/y`.
+/// suitable for passing to `live-encoder --crop-min-x/y --crop-max-x/y`.
 pub fn compute_crop_rect(hwnd: HWND) -> anyhow::Result<Box2D<u32>> {
     let client_rect = get_client_rect(hwnd)?;
 

@@ -1,6 +1,6 @@
 //! Annex B → AVCC conversion and codec descriptor helpers.
 //!
-//! Used by `live-capture` to convert encoder output before framing, and by
+//! Used by `live-encoder` to convert encoder output before framing, and by
 //! the TS server (via documented byte layout) to build the `/init` response.
 
 // ── Start Code Stripping ────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 //! D3D11 device creation and texture/view helper functions.
 //!
 //! Adapted from the monolith's `src/app/helper.rs`, containing only the
-//! GPU-infrastructure subset needed by the capture pipeline.
+//! GPU-infrastructure subset needed by the transitional capture and encoder pipeline.
 
 use nkcore::prelude::*;
 use nkcore::debug::*;

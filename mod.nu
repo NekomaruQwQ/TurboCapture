@@ -12,7 +12,7 @@
 #
 # Every binary invocation goes through `get-exe`, which runs `cargo build
 # --release --bin <name>` to ensure the binary is up-to-date.  Binaries that
-# may run concurrently across launchers (live-capture, live-ws, live-app) use
+# may run concurrently across launchers (live-encoder, live-ws, live-app) use
 # `get-exe --copy <id>` to copy the exe before spawning — this prevents file
 # locking from blocking subsequent builds on Windows.
 
@@ -183,7 +183,7 @@ export def --wrapped run-youtube-music [...args]: nothing -> nothing {
         ...$args)
 }
 
-# ── Launcher for live-capture and live-kpm ──
+# ── Launcher for transitional live-encoder and live-kpm ──
 
 # Preview the local selector policy without encoding or network transport.
 export def --wrapped run-selector [--config: path, ...args]: nothing -> nothing {
@@ -202,7 +202,7 @@ export def "run-capture auto" []: nothing -> nothing {
     # Ensure LIVE_HOST is set for URL parsing.
     get-url | ignore
 
-    (^(get-exe "live-capture" --copy "auto")
+    (^(get-exe "live-encoder" --copy "auto")
         --mode auto
         --width 1920 --height 1200
         --stream-id main
@@ -219,8 +219,8 @@ export def "run-capture auto" []: nothing -> nothing {
 # crop rect computation, and auto-restart internally.  We just pipe it to
 # `live-ws` for WebSocket delivery.
 export def "run-capture youtube-music" []: nothing -> nothing {
-    # Ensure live-capture is built — spawned internally by live-capture-youtube-music.
-    get-exe "live-capture" --copy "youtube-music" | ignore
+    # Ensure live-encoder is built — spawned internally by live-capture-youtube-music.
+    get-exe "live-encoder" --copy "youtube-music" | ignore
     # Ensure LIVE_HOST is set for URL parsing.
     get-url | ignore
 

@@ -1,4 +1,4 @@
-//! `live-capture` library — reusable capture + encode pipeline.
+//! `live-encoder` library — legacy capture plus the reusable encode pipeline.
 //!
 //! Provides the GPU capture pipeline components and H.264 NAL unit types
 //! used by both the binary and the encoder callback.
@@ -7,6 +7,7 @@ pub mod capture;
 pub mod converter;
 pub mod d3d11;
 pub mod encoder;
+pub mod pipeline;
 pub mod resample;
 pub mod selector;
 

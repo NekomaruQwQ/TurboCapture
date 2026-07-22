@@ -1,6 +1,7 @@
 //! Preview-owned GPU texture resampler using a fullscreen quad.
 //!
-//! The shader starts identical to `live-capture`'s resampler, but its source
+//! The shader starts identical to the original `live-capture` resampler (now
+//! `live-encoder`), but its source
 //! and compiled bytecode live beside `live-selector` so preview filtering can
 //! evolve without changing encoded stream pixels.
 

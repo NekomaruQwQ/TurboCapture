@@ -1,7 +1,7 @@
 //! `live-selector.exe` — local fixed-size preview of the auto-selector output.
 //!
 //! Uses the same foreground matching and Windows Graphics Capture path as
-//! `live-capture --mode auto`, but presents frames directly through D3D11
+//! the legacy `live-encoder --mode auto`, but presents frames directly through D3D11
 //! instead of converting to NV12 or encoding an H.264 stream.
 
 mod capture;
@@ -45,7 +45,7 @@ const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1200;
 /// Background used for letterboxing and periods without an active target.
 const CLEAR_COLOR: [f32; 4] = [41.0 / 255.0, 41.0 / 255.0, 41.0 / 255.0, 1.0];
-/// Normal selector polling cadence, matching `live-capture --mode auto`.
+/// Normal selector polling cadence, matching legacy `live-encoder --mode auto`.
 const SELECTOR_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Capture retry delay after a window closes or WGC reports an error.
 const CAPTURE_RETRY_INTERVAL: Duration = Duration::from_millis(100);

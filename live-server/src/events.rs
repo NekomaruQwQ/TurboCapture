@@ -5,7 +5,7 @@
 //! ## Routes
 //!
 //! - `POST /internal/streams/:streamId/info` — periodic capture metadata from
-//!   `live-capture --mode auto`.  Updates computed strings.
+//!   transitional `live-encoder --mode auto`. Updates computed strings.
 
 use crate::state::AppState;
 
@@ -48,7 +48,7 @@ struct StreamInfoBody {
 
 /// `POST /internal/streams/:streamId/info` — periodic capture metadata.
 ///
-/// Called by `live-capture --mode auto` every poll tick (~2s).  Updates
+/// Called by transitional `live-encoder --mode auto` every poll tick (~2s). Updates
 /// the computed strings that the frontend displays.
 async fn stream_info(
     State(state): State<Arc<AppState>>,

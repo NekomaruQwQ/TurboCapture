@@ -1,4 +1,4 @@
-//! `live-capture.exe` — standalone screen capture + H.264 encoding to stdout.
+//! `live-encoder.exe` — transitional screen capture + H.264 encoding to stdout.
 //!
 //! Captures a window by HWND, encodes with NVENC, and writes
 //! `live-protocol` framed binary messages to stdout.  Pipe through
@@ -13,36 +13,30 @@
 //!
 //! ```text
 //! # Base mode — capture + encode to stdout, pipe through live-ws
-//! live-capture --hwnd 0x1A2B --width 1920 --height 1200 \
+//! live-encoder --hwnd 0x1A2B --width 1920 --height 1200 \
 //!   | live-ws --mode video --server ws://machineA:3000/internal/streams/main
 //!
 //! # Dump to file for testing (production code path)
-//! live-capture --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
+//! live-encoder --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
 //!
 //! # Utility modes
-//! live-capture --enumerate-windows
-//! live-capture --foreground-window
+//! live-encoder --enumerate-windows
+//! live-encoder --foreground-window
 //! ```
 
-use live_capture::{
-    NALUnit,
-    NALUnitType,
+use live_encoder::{
     capture::{self, CaptureSession, CropBox},
-    converter::NV12Converter,
     d3d11,
-    encoder::{H264Encoder, H264EncoderConfig},
+    pipeline::{BgraTextureInput, DEFAULT_BITRATE, VideoEncoderConfig, spawn_stdout_encoder},
     resample::Resampler,
     selector,
 };
-use live_protocol::{MessageType, flags, write_message};
-use live_protocol::avcc::serialize_avcc_payload;
-use live_protocol::video::{CodecParams, write_codec_params_payload, write_frame_payload};
 
 use clap::Parser;
 use nkcore::prelude::*;
 use nkcore::prelude::euclid::Size2D;
 
-use std::io::{BufWriter, Write as _};
+use std::io::Write as _;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -56,15 +50,11 @@ use windows::Win32::System::Com::*;
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1200;
 
-// ── Constants ───────────────────────────────────────────────────────────────
-
-const BITRATE: u32 = 8_000_000; // 8 Mbps CBR
-
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
-/// Standalone screen capture + H.264 encoding to stdout.
+/// Transitional legacy screen capture + H.264 encoding to stdout.
 #[derive(Parser)]
-#[command(name = "live-capture")]
+#[command(name = "live-encoder")]
 struct CliArgs {
     /// Capture mode: base (default), auto (foreground polling + hot-swap),
     /// or crop (fixed subrect extraction).
@@ -228,8 +218,8 @@ fn resolve_capture_mode(args: &CliArgs) -> anyhow::Result<CaptureMode> {
 // ── Logging ─────────────────────────────────────────────────────────────────
 
 /// Set up dual-output logging:
-/// - Encoder init diagnostics (info/debug/trace from `live_capture::encoder`)
-///   go to `live-capture.encoder.log` next to the executable.
+/// - Encoder init diagnostics (info/debug/trace from `live_encoder::encoder`)
+///   go to `live-encoder.log` next to the executable.
 /// - Warnings and errors from encoder code still go to stderr.
 /// - Everything else goes to stderr as usual.
 fn init_logger(stream_id: Option<String>) {
@@ -238,7 +228,7 @@ fn init_logger(stream_id: Option<String>) {
     let encoder_log_file: Option<Mutex<std::fs::File>> = {
         std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("live-capture.encoder.log")))
+            .and_then(|p| p.parent().map(|d| d.join("live-encoder.log")))
             .and_then(|p| std::fs::File::create(p).ok())
             .map(Mutex::new)
     };
@@ -248,7 +238,7 @@ fn init_logger(stream_id: Option<String>) {
     pretty_env_logger::env_logger::Builder::from_env(
         pretty_env_logger::env_logger::Env::default().default_filter_or("info"))
         .format(move |buf, record| {
-            let is_encoder = record.target().starts_with("live_capture::encoder");
+            let is_encoder = record.target().starts_with("live_encoder::encoder");
             let is_diagnostic = record.level() >= log::Level::Info;
             if is_encoder && is_diagnostic
                 && let Some(ref file) = encoder_log_file {
@@ -377,15 +367,15 @@ fn run(hwnd: isize, mode: CaptureMode, frame_rate: u32, clear_color: [f32; 4]) -
         None
     };
 
-    let encoding_handle = thread::Builder::new()
-        .name("encoding".to_owned())
-        .spawn({
-            let device = device.clone();
-            let device_context = device_context.clone();
-            let frame_source = staging_bgra8.clone();
-            move || encoding_thread(&device, &device_context, &frame_source, frame_size, frame_rate)
-        })
-        .context("failed to spawn encoding thread")?;
+    let encoder_input = BgraTextureInput::new(
+        device.clone(),
+        device_context.clone(),
+        staging_bgra8.clone(),
+        frame_size)?;
+    let encoding_handle = spawn_stdout_encoder(encoder_input, VideoEncoderConfig {
+        frame_rate,
+        bitrate: DEFAULT_BITRATE,
+    })?;
 
     log::info!("capture session started");
 
@@ -466,7 +456,6 @@ fn run(hwnd: isize, mode: CaptureMode, frame_rate: u32, clear_color: [f32; 4]) -
 /// Run in auto mode: the selector thread polls the foreground window and sends
 /// swap commands.  The capture loop replaces the `CaptureSession` on each swap
 /// while the encoder keeps running on the same staging texture.
-#[expect(clippy::too_many_lines, reason = "hot-swap capture setup and loop are kept together for lifecycle clarity")]
 fn run_auto(
     width: u32,
     height: u32,
@@ -515,16 +504,17 @@ fn run_auto(
     let resampler = Resampler::new(&device)
         .context("failed to create resampler")?;
 
-    // Start encoding thread (same as base mode — reads from staging texture).
-    let encoding_handle = thread::Builder::new()
-        .name("encoding".to_owned())
-        .spawn({
-            let device = device.clone();
-            let device_context = device_context.clone();
-            let frame_source = staging_bgra8;
-            move || encoding_thread(&device, &device_context, &frame_source, frame_size, frame_rate)
-        })
-        .context("failed to spawn encoding thread")?;
+    // Keep the transitional auto mode on the same texture-to-video boundary as
+    // base and crop modes so Phase 3 only needs to replace the input producer.
+    let encoder_input = BgraTextureInput::new(
+        device.clone(),
+        device_context.clone(),
+        staging_bgra8,
+        frame_size)?;
+    let encoding_handle = spawn_stdout_encoder(encoder_input, VideoEncoderConfig {
+        frame_rate,
+        bitrate: DEFAULT_BITRATE,
+    })?;
 
     // Start the selector polling thread.
     let swap_rx = selector::spawn_selector(selector::SelectorConfig {
@@ -617,116 +607,4 @@ fn run_auto(
             }
         }
     }
-}
-
-// ── Encoding thread ─────────────────────────────────────────────────────────
-
-/// Encoding thread: reads from the shared staging texture, converts BGRA→NV12,
-/// encodes H.264 via NVENC, converts NALs to AVCC, and writes `live-protocol`
-/// framed messages to stdout.
-#[expect(clippy::similar_names, reason = "last_sps/last_pps are intentionally parallel")]
-#[expect(clippy::exit, reason = "intentional exit when stdout pipe breaks")]
-fn encoding_thread(
-    device: &ID3D11Device,
-    device_context: &ID3D11DeviceContext,
-    frame_source: &ID3D11Texture2D,
-    frame_size: Size2D<u32>,
-    frame_rate: u32) {
-    log::info!("encoding thread started");
-
-    // SAFETY: Called once at the start of the encoding thread before any COM usage.
-    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-        .ok()
-        .expect("CoInitializeEx failed on encoding thread");
-
-    let nv12_converter =
-        NV12Converter::new(device, device_context, frame_size.width, frame_size.height)
-            .expect("failed to create NV12 converter");
-    let nv12_staging =
-        d3d11::create_texture_2d(
-            device,
-            frame_size,
-            DXGI_FORMAT_NV12,
-            &[D3D11_BIND_RENDER_TARGET])
-            .expect("failed to create NV12 staging texture");
-    log::info!("NV12 converter and staging texture created");
-
-    let stdout = std::io::stdout();
-    let mut writer = BufWriter::new(stdout.lock());
-    let mut last_sps: Option<Vec<u8>> = None;
-    let mut last_pps: Option<Vec<u8>> = None;
-
-    let encoder = H264Encoder::new(device, H264EncoderConfig {
-        frame_size,
-        frame_rate,
-        bitrate: BITRATE,
-    }).expect("failed to create H.264 encoder");
-
-    encoder.run(
-        // Frame source: convert BGRA8 → NV12
-        || {
-            nv12_converter
-                .convert(frame_source, &nv12_staging)
-                .expect("BGRA8 \u{2192} NV12 conversion failed");
-            nv12_staging.clone()
-        },
-        // Frame callback: convert to AVCC, write live-protocol messages to stdout
-        |nal_units: Vec<NALUnit>| {
-            if nal_units.is_empty() {
-                return;
-            }
-
-            // Extract SPS/PPS from IDR frames and send CodecParams if changed.
-            let sps = nal_units.iter().find(|u| u.unit_type == NALUnitType::SPS);
-            let pps = nal_units.iter().find(|u| u.unit_type == NALUnitType::PPS);
-
-            if let (Some(sps), Some(pps)) = (sps, pps) {
-                let sps_changed = last_sps.as_ref() != Some(&sps.data);
-                let pps_changed = last_pps.as_ref() != Some(&pps.data);
-
-                if sps_changed || pps_changed {
-                    let params = CodecParams {
-                        sps: sps.data.clone(),
-                        pps: pps.data.clone(),
-                        width: frame_size.width,
-                        height: frame_size.height,
-                    };
-
-                    let payload = write_codec_params_payload(&params);
-                    if let Err(e) = write_message(
-                        &mut writer, MessageType::CodecParams, 0, &payload) {
-                        log::error!("failed to write CodecParams: {e}");
-                        return;
-                    }
-
-                    last_sps = Some(sps.data.clone());
-                    last_pps = Some(pps.data.clone());
-                    log::info!(
-                        "sent CodecParams: {}x{}, SPS={}B, PPS={}B",
-                        frame_size.width, frame_size.height,
-                        params.sps.len(), params.pps.len());
-                }
-            }
-
-            // Build AVCC payload from all NAL units.
-            let is_keyframe = nal_units.iter().any(|u| u.unit_type == NALUnitType::IDR);
-            let nal_data: Vec<&[u8]> = nal_units.iter().map(|u| u.data.as_slice()).collect();
-            let avcc_payload = serialize_avcc_payload(&nal_data);
-
-            let timestamp_us = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros() as u64;
-
-            let frame_payload = write_frame_payload(timestamp_us, &avcc_payload);
-            let frame_flags = if is_keyframe { flags::IS_KEYFRAME } else { 0 };
-
-            if let Err(e) = write_message(
-                &mut writer, MessageType::Frame, frame_flags, &frame_payload) {
-                log::error!("failed to write Frame: {e}");
-                // Stdout broken (pipe closed) — exit cleanly.
-                let _ = writer.flush();
-                std::process::exit(0);
-            }
-        });
 }

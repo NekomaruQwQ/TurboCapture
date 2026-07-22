@@ -1,6 +1,6 @@
 //! Shared binary framing protocol for Nekomaru LiveUI.
 //!
-//! All M4 components use this crate for IPC: producers (`live-capture`,
+//! All M4 components use this crate for IPC: producers (`live-encoder`,
 //! `live-kpm`) write framed messages to stdout, and `live-ws` reads them
 //! from stdin for WebSocket relay.  The TS server and frontend consume the
 //! same wire format.

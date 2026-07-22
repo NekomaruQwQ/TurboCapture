@@ -1,7 +1,7 @@
 //! Selector config storage and routes.
 //!
-//! The server stores the selector config; `live-capture --mode auto` polls it.
-//! No in-process selector management — that lives in `live-capture`.
+//! The server stores the selector config; transitional `live-encoder --mode auto` polls it.
+//! No in-process selector management—the legacy implementation lives in `live-encoder`.
 //!
 //! ## Routes
 //!
@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 /// Full preset config shape persisted to disk.
 ///
-/// Matches the JSON format consumed by `live-capture --mode auto`:
+/// Matches the JSON format consumed by transitional `live-encoder --mode auto`:
 /// ```json
 /// {
 ///   "preset": "main",
@@ -43,7 +43,7 @@ pub struct PresetConfig {
 // ── Selector Config ─────────────────────────────────────────────────────
 
 /// Server-side selector config state.  Just storage + persistence —
-/// no foreground polling or pattern matching (that's `live-capture`'s job).
+/// no foreground polling or pattern matching (currently `live-encoder`'s legacy job).
 pub struct SelectorConfig {
     pub config: PresetConfig,
     pub config_path: PathBuf,

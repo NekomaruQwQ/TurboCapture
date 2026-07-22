@@ -23,7 +23,7 @@ live-audio/Cargo.toml                       human
 live-protocol/Cargo.toml                    human
 live-selector/Cargo.toml                    human
 live-ws/Cargo.toml                          human
-live-capture/Cargo.toml                     human
+live-encoder/Cargo.toml                     human
 live-capture-youtube-music/Cargo.toml       human
 live-kpm/Cargo.toml                         human
 live-server/Cargo.toml                      human
@@ -70,7 +70,7 @@ src/selector/config.rs                      agent
 src/main.rs                                 agent
 src/crop.rs                                 agent
 
-## live-capture/
+## live-encoder/
 src/main.rs                                 agent
 src/lib.rs                                  agent
 src/capture.rs                              agent

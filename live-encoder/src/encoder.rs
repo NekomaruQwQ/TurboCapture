@@ -346,6 +346,7 @@ impl H264Encoder {
         Ok(())
     }
 
+    #[expect(clippy::try_err, reason = "project style requires Err(error)? for explicit propagation")]
     fn process_output(
         &mut self,
         frame_target: &mut impl FnMut(Vec<NALUnit>))

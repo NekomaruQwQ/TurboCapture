@@ -1,7 +1,7 @@
 //! `live-server` — M4 relay server for Nekomaru LiveUI.
 //!
 //! Thin HTTP/WS relay.  All capture intelligence lives in the Rust workers
-//! (`live-capture`, `live-kpm`).  The server relays binary frames, stores
+//! (`live-encoder`, `live-kpm`). The server relays binary frames, stores
 //! config, and proxies frontend assets from Vite.
 //!
 //! ## Usage

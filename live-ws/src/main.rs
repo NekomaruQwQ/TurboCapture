@@ -14,7 +14,7 @@
 //! ## Usage
 //!
 //! ```text
-//! live-capture ... | live-ws --mode video --server ws://machineA:3000/internal/streams/main
+//! live-encoder ... | live-ws --mode video --server ws://machineA:3000/internal/streams/main
 //! live-kpm        | live-ws --server ws://machineA:3000/internal/kpm
 //! live-audio ...  | live-ws --mode audio --server ws://machineA:3000/internal/audio
 //! ```

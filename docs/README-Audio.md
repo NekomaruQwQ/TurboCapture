@@ -104,7 +104,7 @@ Three layers, mirroring the video pipeline:
 
 ## IPC Wire Protocol
 
-Same envelope as the video protocol (`live-capture`):
+Same envelope as the video protocol (`live-encoder`):
 
 ```
 [u8:  message_type]
@@ -362,7 +362,7 @@ local WLAN link this is negligible. Compression (Opus, AAC) would add:
 
 Raw PCM keeps the pipeline simple and latency minimal.
 
-### Why a separate binary instead of integrating into `live-capture.exe`?
+### Why a separate binary instead of integrating into `live-encoder.exe`?
 
 Audio capture is global (one device) while video capture is per-window. The
 audio device doesn't change when the window selector switches targets. A separate
@@ -395,7 +395,7 @@ ensuring glitch-free playback independent of main thread load.
 
 ### Why no A/V sync?
 
-Both `live-capture.exe` and `live-audio.exe` use the same wall clock
+Both `live-encoder.exe` and `live-audio.exe` use the same wall clock
 (`SystemTime::now()`) on the same machine, so their timestamps are directly
 comparable. Audio has no encoding step and arrives ~20ms ahead of video — but
 this difference is imperceptible. Explicit sync (holding audio until video

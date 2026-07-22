@@ -2,9 +2,9 @@
 //!
 //! Polls for a YouTube Music window by title prefix, computes the crop
 //! rectangle for the player bar using CSS-based DPI-independent geometry,
-//! and spawns `live-capture --mode crop` with the calculated coordinates.
+//! and spawns `live-encoder --mode crop` with the calculated coordinates.
 //!
-//! This binary is a drop-in replacement for `live-capture` in the pipeline:
+//! This binary is a drop-in replacement for the transitional `live-encoder` CLI in the pipeline:
 //!
 //! ```text
 //! live-capture-youtube-music -t "YouTube Music - Nekomaru LiveUI" \
@@ -25,7 +25,7 @@ use clap::Parser;
 use windows::Win32::Foundation::HWND;
 
 /// Minimum child lifetime before we consider it a "real" run.
-/// If `live-capture` exits faster than this (e.g. broken pipe from dead
+/// If `live-encoder` exits faster than this (e.g. broken pipe from dead
 /// live-ws), we sleep before retrying to avoid a tight spin loop.
 const RAPID_EXIT_THRESHOLD: Duration = Duration::from_secs(1);
 
@@ -39,7 +39,7 @@ const LOG_PREFIX: &str = "[@youtube-music]";
 /// Stdout-first YouTube Music capture producer.
 ///
 /// Finds the YouTube Music window by title prefix, computes the player bar crop rect
-/// from CSS layout constants and actual DPI, and spawns live-capture in
+/// from CSS layout constants and actual DPI, and spawns live-encoder in
 /// crop mode.  Restarts automatically when the window disappears.
 #[derive(Parser)]
 #[command(name = "live-capture-youtube-music")]
@@ -48,7 +48,7 @@ struct CliArgs {
     #[arg(short = 't', long)]
     title: String,
 
-    /// Stream ID tag passed to live-capture for log output.
+    /// Stream ID tag passed to live-encoder for log output.
     #[arg(long, default_value = "youtube-music")]
     stream_id: String,
 
@@ -98,7 +98,7 @@ fn sibling_exe(name: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Spawn `live-capture --mode crop` with the given crop rect and wait for it
+/// Spawn `live-encoder --mode crop` with the given crop rect and wait for it
 /// to exit.  The child inherits our stdout so its live-protocol frames flow
 /// directly to the downstream pipe (e.g. `live-ws`).
 fn spawn_and_wait(
@@ -121,7 +121,7 @@ fn spawn_and_wait(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn live-capture: {e}"))?
+        .map_err(|e| anyhow::anyhow!("failed to spawn live-encoder: {e}"))?
         .wait()
         .map_err(Into::into)
 }
@@ -153,8 +153,8 @@ fn main() {
     let poll_interval = Duration::from_secs(args.poll_interval);
 
     let capture_exe =
-        sibling_exe("live-capture.youtube-music")
-            .expect("failed to locate live-capture.youtube-music.exe; ensure it is built and co-located with this binary");
+        sibling_exe("live-encoder.youtube-music")
+            .expect("failed to locate live-encoder.youtube-music.exe; ensure it is built and co-located with this binary");
     log::info!("{LOG_PREFIX} using capture exe: {}", capture_exe.display());
 
     #[expect(clippy::infinite_loop, reason = "This process is designed to run indefinitely, respawning the capture child as needed.")]
@@ -182,17 +182,17 @@ fn main() {
             window.title, window.hwnd,
             crop.min.x, crop.min.y, crop.max.x, crop.max.y);
 
-        // Step 3: spawn live-capture and wait.
+        // Step 3: spawn live-encoder and wait.
         let started = Instant::now();
         match spawn_and_wait(&capture_exe, window.hwnd, &crop, &args) {
-            Ok(status) => log::info!("{LOG_PREFIX} live-capture exited: {status}"),
-            Err(e) => log::error!("{LOG_PREFIX} live-capture error: {e}"),
+            Ok(status) => log::info!("{LOG_PREFIX} live-encoder exited: {status}"),
+            Err(e) => log::error!("{LOG_PREFIX} live-encoder error: {e}"),
         }
 
         // Guard against rapid exits (e.g. broken pipe from dead live-ws).
         if started.elapsed() < RAPID_EXIT_THRESHOLD {
             log::warn!(
-                "{LOG_PREFIX} live-capture exited too quickly, cooling down for {}s",
+                "{LOG_PREFIX} live-encoder exited too quickly, cooling down for {}s",
                 RAPID_EXIT_COOLDOWN.as_secs());
             std::thread::sleep(RAPID_EXIT_COOLDOWN);
         } else {
