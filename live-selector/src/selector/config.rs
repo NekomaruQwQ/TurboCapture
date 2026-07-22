@@ -1,190 +1,333 @@
-//! Preview-owned selector preset parsing and window matching.
+//! Local selector-profile parsing, validation, and last-valid retention.
 //!
-//! The JSON and pattern syntax intentionally remains compatible with the
-//! server and `live-capture`, while this implementation can evolve preview
-//! selection behavior without changing the streaming selector.
+//! The parsed policy stores normalized rules so foreground polling performs one
+//! allocation per candidate path rather than repeatedly normalizing every rule.
 
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeSet, HashMap},
+    fs::File,
+    io::Read as _,
+    path::Path,
+};
 
-/// Full server selector configuration with one active named preset.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PresetConfig {
-    /// Name of the active entry in [`Self::presets`].
-    pub preset: String,
-    /// Named pattern lists supplied by `live-server`.
-    pub presets: HashMap<String, Vec<String>>,
-}
+use anyhow::Context as _;
 
-impl PresetConfig {
-    /// Return the active pattern list, or `None` when the server references a
-    /// missing preset. A missing preset deliberately produces no selection.
-    pub fn active_patterns(&self) -> Option<&Vec<String>> { self.presets.get(&self.preset) }
-}
-
-/// Parsed `[@mode] <exePath>[@<windowTitle>]` selector pattern.
-#[derive(Debug, Clone)]
-pub struct ParsedPattern {
-    /// Optional mode prefix retained for syntax compatibility and diagnostics.
-    pub mode: Option<String>,
-    /// Executable-path substring, with slash normalization during matching.
-    pub exe_path: String,
-    /// Optional case-insensitive window-title substring.
-    pub title: Option<String>,
-}
-
-/// Parse one selector pattern without rejecting empty components.
+/// Maximum accepted selector document size.
 ///
-/// Empty executable or title components behave as wildcards, matching the
-/// established server configuration semantics. String indices come only from
-/// ASCII delimiter searches and are therefore valid UTF-8 boundaries.
-#[expect(clippy::string_slice, reason = "indices from str::find are valid UTF-8 boundaries")]
-pub fn parse_pattern(pattern: &str) -> ParsedPattern {
-    let mut mode: Option<String> = None;
-    let mut body = pattern;
+/// Profile files are expected to be tiny. Bounding the read prevents a damaged
+/// or replaced file from causing an unbounded allocation before parsing.
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
-    if body.starts_with('@')
-        && let Some(space_idx) = body.find(' ')
-            && space_idx > 1 {
-                mode = Some(body[1..space_idx].to_owned());
-                body = &body[space_idx + 1..];
-            }
-
-    let (exe_path, title) = match body.find('@') {
-        Some(idx) => (body[..idx].to_owned(), Some(body[idx + 1..].to_owned())),
-        None => (body.to_owned(), None),
-    };
-
-    ParsedPattern { mode, exe_path, title }
+/// Deserialized top-level selector document.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectorDocument {
+    /// Enabled profile names and their corresponding definitions.
+    profiles: ProfileCollection,
 }
 
-/// Test one parsed pattern against executable path and window title.
-///
-/// `case_insensitive` is used by exclusion rules so casing cannot bypass a
-/// veto. Include patterns preserve the existing case-sensitive path behavior;
-/// title matching is always case-insensitive.
-pub fn matches_parsed(
-    parsed: &ParsedPattern,
-    executable_path: &str,
-    window_title: &str,
-    case_insensitive: bool) -> bool {
-    if !parsed.exe_path.is_empty() {
-        let haystack = executable_path.replace('\\', "/");
-        let needle = parsed.exe_path.replace('\\', "/");
-        let matches = if case_insensitive {
-            haystack.to_lowercase().contains(&needle.to_lowercase())
-        } else {
-            haystack.contains(&needle)
-        };
-        if !matches { return false; }
+/// Enabled profile names plus dynamically named profile definitions.
+#[derive(Debug, serde::Deserialize)]
+struct ProfileCollection {
+    /// Only these named profiles participate in the active policy.
+    enabled: Vec<String>,
+    /// Every other key under `[profiles]` is a named profile definition.
+    #[serde(flatten)]
+    definitions: HashMap<String, ProfileDefinition>,
+}
+
+/// Executable-path substring rules contributed by one profile.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileDefinition {
+    /// Allow rules contributed to the union when this profile is enabled.
+    #[serde(default)]
+    include: Vec<String>,
+    /// Veto rules applied globally when this profile is enabled.
+    #[serde(default)]
+    exclude: Vec<String>,
+}
+
+/// Validated, normalized policy used by foreground matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorPolicy {
+    /// Union of includes contributed by every enabled profile.
+    include_rules: Vec<String>,
+    /// Global vetoes contributed by every enabled profile.
+    exclude_rules: Vec<String>,
+}
+
+impl SelectorPolicy {
+    /// Parse and validate one complete selector document.
+    ///
+    /// Unknown enabled profiles and empty rules are rejected because either can
+    /// silently weaken a screen-sharing allowlist. No partially parsed policy is
+    /// returned on error.
+    pub fn parse(document: &str) -> anyhow::Result<Self> {
+        let document: SelectorDocument =
+            toml::from_str(document).context("invalid selector TOML")?;
+        let unknown_profiles = document
+            .profiles
+            .enabled
+            .iter()
+            .filter(|name| !document.profiles.definitions.contains_key(*name))
+            .collect::<BTreeSet<_>>();
+        if !unknown_profiles.is_empty() {
+            let names = unknown_profiles
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!("unknown enabled profiles: {names}");
+        }
+
+        let mut include_rules = Vec::new();
+        let mut exclude_rules = Vec::new();
+        for profile_name in &document.profiles.enabled {
+            // The unknown-profile check above proves every enabled name exists.
+            let profile = document
+                .profiles
+                .definitions
+                .get(profile_name)
+                .expect("validated enabled profile must exist");
+            append_rules(
+                &mut include_rules,
+                &profile.include,
+                profile_name,
+                "include")?;
+            append_rules(
+                &mut exclude_rules,
+                &profile.exclude,
+                profile_name,
+                "exclude")?;
+        }
+
+        Ok(Self {
+            include_rules,
+            exclude_rules,
+        })
     }
 
-    if let Some(ref title_pattern) = parsed.title
-        && !title_pattern.is_empty()
-            && !window_title.to_lowercase().contains(&title_pattern.to_lowercase()) {
-            return false;
-        }
-
-    true
+    /// Decide whether an executable path is allowed by the active policy.
+    ///
+    /// Includes form a union, while any exclusion vetoes the candidate. An
+    /// empty enabled set naturally has no include match and therefore fails
+    /// closed.
+    pub fn allows_executable(&self, executable_path: &str) -> bool {
+        let candidate = normalize_path(executable_path);
+        self.include_rules
+            .iter()
+            .any(|rule| candidate.contains(rule))
+            && !self
+                .exclude_rules
+                .iter()
+                .any(|rule| candidate.contains(rule))
+    }
 }
 
-/// Determine whether a window should be previewed by the active patterns.
+/// Atomically replaceable policy state owned by the selector thread.
 ///
-/// Exclusion matches veto the window regardless of pattern order. Otherwise,
-/// any include match accepts the window. Mode annotations remain part of the
-/// syntax because `exclude` uses the same prefix position, but previews do not
-/// publish or otherwise consume include modes.
-pub fn should_capture(
-    patterns: &[String],
-    executable_path: &str,
-    title: &str) -> bool {
-    let mut matched = false;
+/// Candidate parsing happens before assignment, so a failed reload cannot
+/// partially mutate or discard the last valid policy.
+#[derive(Debug, Default)]
+pub struct SelectorPolicyStore {
+    /// Most recently accepted complete policy, or `None` before first success.
+    active: Option<SelectorPolicy>,
+}
 
-    for raw in patterns {
-        let parsed = parse_pattern(raw);
-        if parsed.mode.as_deref() == Some("exclude") {
-            if matches_parsed(&parsed, executable_path, title, true) {
-                return false;
-            }
-            continue;
-        }
-        if !matched && matches_parsed(&parsed, executable_path, title, false) {
-            matched = true;
-        }
+impl SelectorPolicyStore {
+    /// Return the active policy, if any configuration has succeeded.
+    pub const fn active(&self) -> Option<&SelectorPolicy> {
+        self.active.as_ref()
     }
 
-    matched
+    /// Load a bounded UTF-8 document and activate it only after validation.
+    ///
+    /// Returns whether the accepted policy differs from the previous one. File,
+    /// size, UTF-8, syntax, and schema errors leave [`Self::active`] unchanged.
+    pub fn reload_path(&mut self, path: &Path) -> anyhow::Result<bool> {
+        let document = read_bounded_document(path)?;
+        self.reload_document(&document)
+    }
+
+    /// Parse an in-memory candidate and activate it as one complete value.
+    ///
+    /// This boundary makes last-valid retention directly testable without
+    /// coupling policy tests to filesystem timestamp behavior.
+    fn reload_document(&mut self, document: &str) -> anyhow::Result<bool> {
+        let candidate = SelectorPolicy::parse(document)?;
+        let changed = self.active.as_ref() != Some(&candidate);
+        self.active = Some(candidate);
+        Ok(changed)
+    }
+}
+
+/// Append normalized non-empty rules while preserving declaration order.
+fn append_rules(
+    destination: &mut Vec<String>,
+    rules: &[String],
+    profile_name: &str,
+    rule_kind: &str) -> anyhow::Result<()> {
+    for rule in rules {
+        let normalized = normalize_path(rule.trim());
+        if normalized.is_empty() {
+            anyhow::bail!("profile \"{profile_name}\" contains an empty {rule_kind} rule");
+        }
+        if !destination.contains(&normalized) {
+            destination.push(normalized);
+        }
+    }
+    Ok(())
+}
+
+/// Normalize Windows path rules for slash- and case-insensitive matching.
+fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
+}
+
+/// Read at most [`MAX_CONFIG_BYTES`] plus one sentinel byte from a config file.
+fn read_bounded_document(path: &Path) -> anyhow::Result<String> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open selector config {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read selector config {}", path.display()))?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "selector config {} exceeds the {} byte limit",
+            path.display(),
+            MAX_CONFIG_BYTES);
+    }
+    String::from_utf8(bytes)
+        .with_context(|| format!("selector config {} is not UTF-8", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
+    /// Representative policy used by parsing and retention tests.
+    const CODE_POLICY: &str = r#"
+[profiles]
+enabled = ["code"]
+
+[profiles.code]
+include = ["Code.exe", "D:/Tools/Zed/"]
+"#;
+
     #[test]
-    fn active_patterns_returns_selected_preset() {
-        let config = PresetConfig {
-            preset: "main".into(),
-            presets: HashMap::from([("main".into(), vec!["Code.exe".into()])]),
-        };
-        assert_eq!(config.active_patterns(), Some(&vec!["Code.exe".into()]));
+    fn empty_enabled_profiles_select_nothing() {
+        let policy = SelectorPolicy::parse(
+            r#"
+[profiles]
+enabled = []
+
+[profiles.code]
+include = ["Code.exe"]
+"#).unwrap();
+        assert!(!policy.allows_executable("C:/Apps/Code.exe"));
     }
 
     #[test]
-    fn parse_simple_executable() {
-        let pattern = parse_pattern("devenv.exe");
-        assert!(pattern.mode.is_none());
-        assert_eq!(pattern.exe_path, "devenv.exe");
-        assert!(pattern.title.is_none());
+    fn malformed_document_is_rejected() {
+        let error = SelectorPolicy::parse("[profiles\nenabled = []")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid selector TOML"));
     }
 
     #[test]
-    fn parse_mode_and_title() {
-        let pattern = parse_pattern("@code Code.exe@LiveUI");
-        assert_eq!(pattern.mode.as_deref(), Some("code"));
-        assert_eq!(pattern.exe_path, "Code.exe");
-        assert_eq!(pattern.title.as_deref(), Some("LiveUI"));
+    fn unknown_enabled_profiles_are_reported_by_name() {
+        let error = SelectorPolicy::parse(
+            r#"
+[profiles]
+enabled = ["missing", "also-missing"]
+
+[profiles.code]
+include = ["Code.exe"]
+"#).unwrap_err()
+        .to_string();
+        assert!(error.contains("also-missing"));
+        assert!(error.contains("missing"));
     }
 
     #[test]
-    fn executable_matching_normalizes_path_separators() {
-        let pattern = parse_pattern("C:/Program Files/JetBrains/");
-        assert!(matches_parsed(
-            &pattern,
-            "C:\\Program Files\\JetBrains\\idea64.exe",
-            "",
-            false));
+    fn enabled_profile_includes_form_a_union() {
+        let policy = SelectorPolicy::parse(
+            r#"
+[profiles]
+enabled = ["code", "game"]
+
+[profiles.code]
+include = ["Code.exe"]
+
+[profiles.game]
+include = ["D:/Games/"]
+"#).unwrap();
+        assert!(policy.allows_executable("C:/Apps/Code.exe"));
+        assert!(policy.allows_executable("D:/Games/example.exe"));
+        assert!(!policy.allows_executable("C:/Windows/notepad.exe"));
     }
 
     #[test]
-    fn title_matching_is_case_insensitive() {
-        let pattern = parse_pattern("Code.exe@liveui");
-        assert!(matches_parsed(
-            &pattern,
-            "C:\\Code.exe",
-            "Nekomaru LiveUI",
-            false));
-        assert!(!matches_parsed(
-            &pattern,
-            "C:\\Code.exe",
-            "Some Other Window",
-            false));
+    fn exclusions_veto_includes_across_profiles() {
+        let policy = SelectorPolicy::parse(
+            r#"
+[profiles]
+enabled = ["games", "privacy"]
+
+[profiles.games]
+include = ["D:/Games/"]
+
+[profiles.privacy]
+exclude = ["D:/Games/unsafe-overlay.exe"]
+"#).unwrap();
+        assert!(policy.allows_executable("D:/Games/safe.exe"));
+        assert!(!policy.allows_executable("D:/Games/unsafe-overlay.exe"));
     }
 
     #[test]
-    fn include_accepts_match_and_rejects_unmatched_window() {
-        let patterns = vec!["@code devenv.exe".into()];
-        assert!(should_capture(&patterns, "C:\\devenv.exe", "Test"));
-        assert!(!should_capture(&patterns, "C:\\notepad.exe", "Test"));
+    fn matching_normalizes_slashes_and_case() {
+        let policy = SelectorPolicy::parse(CODE_POLICY).unwrap();
+        assert!(policy.allows_executable("c:\\apps\\CODE.EXE"));
+        assert!(policy.allows_executable("d:\\tools\\zed\\Zed.exe"));
     }
 
     #[test]
-    fn exclusion_takes_priority_over_include() {
-        let patterns = vec![
-            "@game D:/7-Games/".into(),
-            "@exclude vtube studio.exe".into(),
-        ];
-        assert!(!should_capture(
-            &patterns,
-            "D:/7-Games/vtube studio.exe",
-            "VTube"));
+    fn invalid_reload_retains_last_valid_policy() {
+        let mut store = SelectorPolicyStore::default();
+        assert!(store.reload_document(CODE_POLICY).unwrap());
+        store.reload_document("[profiles").unwrap_err();
+        assert!(
+            store
+                .active()
+                .is_some_and(|policy| policy.allows_executable("C:/Apps/Code.exe")));
+    }
+
+    #[test]
+    fn missing_initial_file_leaves_policy_inactive() {
+        let missing = PathBuf::from(format!(
+            "selector-config-that-does-not-exist-{}.toml",
+            std::process::id()));
+        let mut store = SelectorPolicyStore::default();
+        store.reload_path(&missing).unwrap_err();
+        assert!(store.active().is_none());
+    }
+
+    #[test]
+    fn empty_rules_are_rejected() {
+        let error = SelectorPolicy::parse(
+            r#"
+[profiles]
+enabled = ["unsafe"]
+
+[profiles.unsafe]
+include = ["  "]
+"#).unwrap_err()
+        .to_string();
+        assert!(error.contains("empty include rule"));
     }
 }

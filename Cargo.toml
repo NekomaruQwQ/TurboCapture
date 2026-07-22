@@ -47,6 +47,7 @@ serde_json = "1.0"
 tap = "1.0.1"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-tungstenite = { version = "0.30.0", features = ["connect"] }
+toml = "1.1.2"
 ureq = "3"
 widestring = "1.2.1"
 win32-version-info = "0.3.0"

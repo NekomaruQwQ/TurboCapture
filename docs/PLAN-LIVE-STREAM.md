@@ -1,6 +1,6 @@
 # Live Stream Pipeline Refactor
 
-**Status:** Planned
+**Status:** In progress — Phase 1 complete
 
 ## Purpose
 
@@ -308,7 +308,7 @@ the current end-to-end behavior remains available during migration.
 
 ## Migration Phases
 
-### Phase 0 — Documentation and contracts
+### Phase 0 — Documentation and contracts (Complete)
 
 - Record the target architecture in this plan and the main README.
 - Treat `data/selector-new.toml` as ignored design input rather than a file to
@@ -316,7 +316,7 @@ the current end-to-end behavior remains available during migration.
 - Agree on ownership, config semantics, shared-resource invariants, and failure
   boundaries before moving code.
 
-### Phase 1 — New profile model in `live-selector`
+### Phase 1 — New profile model in `live-selector` (Complete)
 
 - Implement TOML deserialization for enabled named profiles.
 - Implement unioned includes and global exclusion vetoes.
@@ -454,11 +454,10 @@ This rename frees the `live-capture` name while retaining the existing
 
 ## Dependencies
 
-The profile migration is expected to add the `toml` crate as a direct workspace
-dependency. It is necessary because the new user-authored format is TOML and the
-workspace does not currently have a direct TOML parser. Hand-writing a parser
-would create ambiguous edge cases in the component enforcing the screen-sharing
-safety policy.
+The profile migration added the `toml` crate as a direct workspace dependency.
+It is necessary because the new user-authored format is TOML and the workspace
+did not previously have a direct TOML parser. Hand-writing a parser would create
+ambiguous edge cases in the component enforcing the screen-sharing safety policy.
 
 `toml` is preferred because it integrates with the existing Serde data model and
 implements the language rather than a project-specific subset. `toml_edit` would

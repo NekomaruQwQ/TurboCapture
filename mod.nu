@@ -20,6 +20,7 @@
 
 const DEFAULT_AUDIO_DEVICE = "Loopback L + R (Focusrite USB Audio)"
 const YOUTUBE_MUSIC_TITLE = "YouTube Music - Nekomaru LiveUI"
+const REPO_ROOT = (path self | path dirname)
 
 # ── Utility Commands ──
 
@@ -46,7 +47,6 @@ def shader-profile [stage: string]: nothing -> string {
 # Output names include the entry point because one HLSL source may contain
 # multiple stages, as resample.hlsl does.
 export def compile-shaders []: nothing -> nothing {
-    const REPO_ROOT = (path self | path dirname)
     let manifest_path = $REPO_ROOT | path join "shaders.toml"
     let manifest = open $manifest_path
 
@@ -185,14 +185,13 @@ export def --wrapped run-youtube-music [...args]: nothing -> nothing {
 
 # ── Launcher for live-capture and live-kpm ──
 
-# Preview the auto-selector locally without encoding or network transport.
-export def --wrapped run-selector [...args]: nothing -> nothing {
-    # Resolve LIVE_HOST before starting the process so an environment prompt
-    # cannot occur after the preview window has begun initialization.
-    get-url | ignore
-
+# Preview the local selector policy without encoding or network transport.
+export def --wrapped run-selector [--config: path, ...args]: nothing -> nothing {
+    # Keep the ignored personal example as the convenient default while still
+    # allowing an explicit profile file as the first positional argument.
+    let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
     (^(get-exe "live-selector" --copy "selector")
-        --config-url (get-url "/api/selector/config")
+        --config $config_path
         ...$args)
 }
 

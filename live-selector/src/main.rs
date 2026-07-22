@@ -11,6 +11,7 @@ mod resample;
 mod selector;
 
 use std::{
+    path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -19,7 +20,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use crate::{
     capture::CaptureSession,
-    selector::{SelectorConfig, SwapCommand, spawn_selector},
+    selector::{SelectorCommand, SelectorConfig, spawn_selector},
 };
 use nkcore::{
     os::windows::winit::{AppEvent, EventLoopExt as _},
@@ -55,11 +56,11 @@ const IDLE_WAKE_INTERVAL: Duration = Duration::from_millis(50);
 
 /// CLI arguments for the local selector preview.
 #[derive(Parser)]
-#[command(name = "live-selector", about = "Preview the auto-selector in a fixed-size window")]
+#[command(name = "live-selector", about = "Preview allowlisted windows in a fixed-size window")]
 struct Args {
-    /// URL to poll for selector configuration.
+    /// Local selector profile TOML to load and monitor.
     #[arg(long)]
-    config_url: String,
+    config: PathBuf,
 
     /// Fixed physical width of the preview client area.
     #[arg(long, default_value_t = DEFAULT_WIDTH, value_parser = clap::value_parser!(u32).range(1..))]
@@ -81,15 +82,6 @@ struct SelectedTarget {
     hwnd: isize,
     /// Human-readable executable description used in lifecycle logs.
     capture_info: String,
-}
-
-impl From<SwapCommand> for SelectedTarget {
-    fn from(command: SwapCommand) -> Self {
-        Self {
-            hwnd: command.hwnd,
-            capture_info: command.capture_info,
-        }
-    }
 }
 
 fn main() {
@@ -138,7 +130,7 @@ fn run(args: Args) -> anyhow::Result<()> {
                 Presenter::new(preview_hwnd, output_size, CLEAR_COLOR)
                     .expect("failed to initialize selector preview presenter");
             let swap_rx = spawn_selector(SelectorConfig {
-                config_url: args.config_url,
+                config_path: args.config,
                 ignored_hwnd: preview_hwnd.0 as isize,
                 poll_interval: SELECTOR_POLL_INTERVAL,
             });
@@ -172,7 +164,7 @@ struct PreviewState {
     /// GPU presentation state, declared before `window` so it drops first.
     presenter: Presenter,
     /// Selector updates consumed without blocking the window event loop.
-    swap_rx: mpsc::Receiver<SwapCommand>,
+    swap_rx: mpsc::Receiver<SelectorCommand>,
     /// Latest selected target retained across capture-session failures.
     selected: Option<SelectedTarget>,
     /// Active WGC session, recreated independently of selector polling.
@@ -247,13 +239,17 @@ impl PreviewState {
         }
         let Some(command) = latest else { return };
 
-        let target = SelectedTarget::from(command);
-        log::info!(
-            "switching preview to HWND 0x{:X} ({})",
-            target.hwnd,
-            target.capture_info);
+        match command {
+            SelectorCommand::Select { hwnd, capture_info } => {
+                log::info!("switching preview to HWND 0x{hwnd:X} ({capture_info})");
+                self.selected = Some(SelectedTarget { hwnd, capture_info });
+            }
+            SelectorCommand::Clear => {
+                log::info!("clearing selector preview");
+                self.selected = None;
+            }
+        }
         self.capture = None;
-        self.selected = Some(target);
         self.retry_at = Instant::now();
 
         if let Err(error) = self.presenter.clear_and_present() {
