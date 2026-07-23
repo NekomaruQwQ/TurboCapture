@@ -26,7 +26,7 @@ div {
 }
 
 div#app {
-    background: url("/img/background.png") center / cover no-repeat fixed, #1a1b1e;
+    background: #1a1b1e;
     overflow: clip;
 }
 

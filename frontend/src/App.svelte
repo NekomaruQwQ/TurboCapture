@@ -9,6 +9,7 @@
     import AboutWidget from "@/widgets/AboutWidget.svelte";
     import KpmMeter from "@/KpmMeter.svelte";
     import ClockWidget from "@/widgets/ClockWidget.svelte";
+    import Stage from "@/components/Stage.svelte";
 
     const liveMode = $derived(strings.value.$liveMode ?? "-");
     const appRendererProps: Partial<StreamRendererProps> = $derived.by(() => {
@@ -34,53 +35,55 @@
     frontend just renders two well-known stream IDs and polls for
     availability to show/hide the YouTube Music island.
 -->
-<Grid rows="1fr 60px" gap="2" class="w-screen h-screen p-2">
-    <!-- Everything other than the YouTube Music island -->
-    <Grid columns="1fr 3fr 40px" gap="2">
-        <!-- Side Column: User Info -->
-        <div class="flex! w-full h-full flex-col gap-2">
-            <div class="island glow px-2 py-1.5">
-                <Grid columns="1fr 1fr" gap="2">
-                    <ClockWidget timeZone="Asia/Shanghai" label="UTC+8 Beijing" />
-                    <ClockWidget timeZone="America/New_York" label="UTC-4 New York" variant="secondary" />
-                </Grid>
+<Stage>
+    <Grid rows="1fr 60px" gap="2" class="w-full h-full p-2">
+        <!-- Everything other than the YouTube Music island -->
+        <Grid columns="1fr 3fr 40px" gap="2">
+            <!-- Side Column: User Info -->
+            <div class="flex! w-full h-full flex-col gap-2">
+                <div class="island glow px-2 py-1.5">
+                    <Grid columns="1fr 1fr" gap="2">
+                        <ClockWidget timeZone="Asia/Shanghai" label="UTC+8 Beijing" />
+                        <ClockWidget timeZone="America/New_York" label="UTC-4 New York" variant="secondary" />
+                    </Grid>
+                </div>
+                <div class="island glow px-2 py-1.5">
+                    <LiveModeWidget />
+                </div>
+                <div class="island glow px-2 py-1.5">
+                    <ClaudeUsageWidget />
+                </div>
+                <div class="island glow px-3 py-2 flex-1">
+                    <pre class="font-sans font-light text-sm whitespace-pre-wrap wrap-break-word">{strings.value.message ?? ""}</pre>
+                </div>
+                <div class="island glow px-2 py-1.5">
+                    <AboutWidget />
+                </div>
             </div>
-            <div class="island glow px-2 py-1.5">
-                <LiveModeWidget />
-            </div>
-            <div class="island glow px-2 py-1.5">
-                <ClaudeUsageWidget />
-            </div>
-            <div class="island glow px-3 py-2 flex-1">
-                <pre class="font-sans font-light text-sm whitespace-pre-wrap wrap-break-word">{strings.value.message ?? ""}</pre>
-            </div>
-            <div class="island glow px-2 py-1.5">
-                <AboutWidget />
-            </div>
-        </div>
-        <!-- Main Column: Marquee + Main Stream -->
-        <Grid rows="auto 1fr" gap="2">
-            <!-- Top Row: Marquee Banner -->
-            <div class="island glow overflow-clip">
-                {#if strings.value.marquee}
-                    <Marquee text={strings.value.marquee} />
-                {/if}
-            </div>
-            <div
-                id="main-stream"
-                class={`island flex-col flex-1 rounded-md items-center justify-center ${(liveMode === "code" ? "glow" : " bg-[#1d1d1d]!")}`}>
-                <StreamRenderer streamId="main" {...appRendererProps} />
+            <!-- Main Column: Marquee + Main Stream -->
+            <Grid rows="auto 1fr" gap="2">
+                <!-- Top Row: Marquee Banner -->
+                <div class="island glow overflow-clip">
+                    {#if strings.value.marquee}
+                        <Marquee text={strings.value.marquee} />
+                    {/if}
+                </div>
+                <div
+                    id="main-stream"
+                    class={`island flex-col flex-1 rounded-md items-center justify-center ${(liveMode === "code" ? "glow" : " bg-[#1d1d1d]!")}`}>
+                    <StreamRenderer streamId="main" {...appRendererProps} />
+                </div>
+            </Grid>
+            <!-- Side Column: Action Panel -->
+            <div class="island glow p-2 flex! w-full h-full flex-col">
+                <KpmMeter />
             </div>
         </Grid>
-        <!-- Side Column: Action Panel -->
-        <div class="island glow p-2 flex! w-full h-full flex-col">
-            <KpmMeter />
+        <!-- Bottom Row: YouTube Music (conditionally rendered) -->
+        <div class="island glow flex! items-center justify-center pt-1">
+            {#if streamStatus.hasYouTubeMusic}
+                <StreamRenderer streamId="youtube-music" {...youtubeMusicRendererProps} />
+            {/if}
         </div>
     </Grid>
-    <!-- Bottom Row: YouTube Music (conditionally rendered) -->
-    <div class="island glow flex! items-center justify-center pt-1">
-        {#if streamStatus.hasYouTubeMusic}
-            <StreamRenderer streamId="youtube-music" {...youtubeMusicRendererProps} />
-        {/if}
-    </div>
-</Grid>
+</Stage>

@@ -52,13 +52,19 @@ struct Args {
     /// issues on high-DPI displays.
     #[arg(long, short = 's')]
     pub scale_factor: Option<f32>,
+
+    /// Allow resizing the host window for frontend layout testing. Production
+    /// windows remain fixed-size unless this flag is provided.
+    #[arg(long)]
+    pub resizable: bool,
 }
 
 fn main() {
     pretty_env_logger::init();
 
-    let Args { url, title, width, height, scale_factor } = Args::parse();
-    log::info!("loading app at {url}, scale factor: {scale_factor:?}");
+    let Args { url, title, width, height, scale_factor, resizable } = Args::parse();
+    log::info!(
+        "loading app at {url}, scale factor: {scale_factor:?}, resizable: {resizable}");
 
     let window_size =
         LogicalSize::new(width, height)
@@ -97,7 +103,7 @@ fn main() {
                     Window::default_attributes()
                         .with_title(&title)
                         .with_inner_size(window_size)
-                        .with_resizable(false)
+                        .with_resizable(resizable)
                         .with_enabled_buttons(
                             WindowButtons::CLOSE |
                             WindowButtons::MINIMIZE))

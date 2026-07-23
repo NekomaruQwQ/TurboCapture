@@ -37,6 +37,7 @@ using those interfaces does not imply DirectX 11-era platform compatibility.
   - [Wire Protocol (live-protocol)](#wire-protocol-live-protocol)
   - [HTTP & WebSocket API](#http--websocket-api)
 - **[Internals](#internals)** — encoding pipeline, capture modes, deployment, reconnection
+  - [Frontend Stage](#frontend-stage)
   - [Encoding Pipeline](#encoding-pipeline-reference)
   - [Capture Modes](#capture-modes)
   - [Distributed Deployment](#distributed-deployment)
@@ -232,6 +233,11 @@ These principles guide M4 development and operation.
 
 8. **Fixed Resolutions.**  Each stream has a fixed output resolution.  The encoder never needs reconfiguration on window switch — the staging texture, NV12 converter, and MFT media types all stay the same.
 
+9. **Fixed Design Composition.** The frontend is authored in a 1280×720
+   logical coordinate system. `Stage` uniformly fits that composition
+   into the host browser surface, so WebView2 and OBS can provide different
+   raster sizes without changing layout geometry.
+
 ### File Ownership
 
 Each source file has a primary owner — **agent** (Claude) or **human** (Nekomaru). See [`FILE-OWNERSHIP.md`](../FILE-OWNERSHIP.md) for the full per-file breakdown.
@@ -270,7 +276,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `check-env <var>` | Error if an environment variable is not set |
 | `patch-env <var> <default>` | Prompt to set an environment variable if missing |
 | `run-server` | Launch `live-server` (builds first via `get-exe`) |
-| `run-app` | Launch `live-app` webview (builds + copies via `get-exe`) |
+| `run-app [--resizable]` | Launch `live-app` webview (builds + copies via `get-exe`); opt into resizing for layout testing |
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
 | `run-capture [--config path]` | Launch standalone `live-capture`; defaults to ignored `data/live-capture.toml` |
 | `run-stream main [--config path]` | Launch `live-stream --mode main` with a local TOML, shared-texture cohort, and direct encoder-to-relay pipe |
@@ -609,6 +615,28 @@ Updates computed strings without putting HTTP on the capture hot path.
 
 ## Internals
 
+### Frontend Stage
+
+The frontend separates its **logical design size** from the browser's **host
+raster size**. `Stage` owns a fixed 1280×720 design surface and applies
+one uniform contain scale:
+
+```
+scale = min(host width / 1280, host height / 720)
+```
+
+Matching aspect ratios fill the host exactly. Other ratios center the complete
+composition with the dark `#app` background as letterboxing; the stage itself
+owns `background.png`, so its crop remains part of the fixed design. Layout
+never depends on `devicePixelRatio`: WebView2 may reach a high-density raster
+through `live-app --scale-factor`, while an OBS Browser Source can expose a
+larger CSS viewport and receive the equivalent scale from `Stage`.
+
+For a full-screen 1080p OBS scene, configure the Browser Source as 1920×1080 at
+60 FPS and leave its scene transform at 1:1. The frontend scales its logical
+stage by 1.5. `live-app` remains fixed-size by default; pass `--resizable` while
+testing contain scaling and letterboxing interactively.
+
 ### Encoding Pipeline Reference
 
 #### Format Converter (`live-encoder/src/converter.rs`)
@@ -903,7 +931,7 @@ LiveUI/
 │       │   ├── AudioStream.svelte   # <AudioStream> (WS push, live-protocol parser, AudioContext)
 │       │   ├── worklet.ts           # AudioWorklet PCM ring buffer processor
 │       │   └── worklet-env.d.ts     # Ambient types for AudioWorklet context
-│       ├── components/              # Reusable Svelte primitives (Grid, Icon, Marquee)
+│       ├── components/              # Stage + reusable Svelte primitives
 │       ├── widgets/                 # LiveWidget + Clock, LiveMode, ClaudeUsage, and About widgets
 │       └── video/
 │           ├── StreamRenderer.svelte  # <StreamRenderer> (canvas + color-key)
