@@ -14,7 +14,7 @@ use live_shared_texture::AdapterLuid;
 /// BGRA support is required by WGC and the preview swap chain. Unlike the
 /// streaming device, this preview-owned device does not request video-processor
 /// support because it never converts to NV12. Managed output must pass the
-/// supervisor's LUID; standalone preview selects the highest-performance GPU.
+/// supervisor's LUID; standalone mode selects the highest-performance GPU.
 /// Multithread protection keeps WGC and presentation access safe if their
 /// scheduling diverges internally.
 pub fn create_device(

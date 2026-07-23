@@ -393,7 +393,7 @@ unsafe fn drain_wasapi_buffer(
         // Log and propagate — the outer capture_loop will exit.
         if let Err(e) = hr {
             log::warn!("GetBuffer failed: {e}");
-            Err(format!("GetBuffer failed: {e}"))?;
+            return Err(format!("GetBuffer failed: {e}"));
         }
 
         // SAFETY: `buffer_ptr` was returned by a successful `GetBuffer` and

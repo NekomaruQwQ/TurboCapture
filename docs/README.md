@@ -140,7 +140,7 @@ graph LR
 | **`live-stream`** | Rust | Main and YouTube Music shared-texture modes, Job-contained process supervision, metadata, and restart policy | mode config + worker paths → managed video stream |
 | **`live-encoder`** | Rust | Shared/private BGRA → NV12 → H.264 → stdout pipeline | shared BGRA texture → live-protocol framed stdout |
 | **`live-audio`** | Rust | WASAPI audio capture → s16le PCM | stdout (live-protocol framed) |
-| **`live-capture`** | Rust | Local profile-driven safe capture or supervisor-resolved generic crop, with optional preview | TOML/HWND + WGC → preview/shared BGRA + JSONL profile events |
+| **`live-capture`** | Rust | Standalone profile-driven safe capture or supervisor-resolved generic crop, with optional local presentation | TOML/HWND + WGC → preview/shared BGRA + JSONL profile events |
 | **`live-ws`** | Rust | stdin → WS relay (modes: default, video, audio) | stdin → WS binary messages |
 | **`live-kpm`** | Rust | Keystroke counter | stdout (live-protocol framed) |
 | **`enumerate-windows`** | Rust | Window discovery (JSON) | stdout JSON |
@@ -162,9 +162,9 @@ policy in the supervisor, then passes only generic HWND/crop coordinates to
 `live-capture`. The encoder never knows about windows, profiles, or stream
 modes, and capture never knows about encoding or networking.
 
-Standalone `live-capture` needs only a local profile TOML and output dimensions.
-Its fixed-size preview remains useful for safe screen sharing independently of
-the livestream stack.
+Standalone mode needs only a local profile TOML and output dimensions. Its
+fixed-size preview remains useful for safe screen sharing independently of the
+livestream stack.
 
 ### Why This Design?
 
@@ -176,7 +176,7 @@ the livestream stack.
 | Keystroke counting | Rust (`live-kpm`, standalone) | `WH_KEYBOARD_LL` hook on a dedicated message pump thread. Privacy-by-design. |
 | HTTP/WS server | Rust (Axum) | Thin relay — uses `live-protocol` directly, no process management. Single toolchain. |
 | Window discovery | Rust (`enumerate-windows`) | Lightweight binary for Nushell scripts. JSON output. |
-| Local safe preview | Rust (`live-capture`) | Loads and atomically reloads a local profile allowlist, then owns selection, WGC, D3D11, resampling, and optional preview presentation. |
+| Standalone capture | Rust (`live-capture`) | Loads and atomically reloads a local profile allowlist, then owns selection, WGC, D3D11, resampling, and optional preview presentation. |
 | YouTube Music capture | Rust (`live-stream --mode youtube-music`) | DPI-independent crop policy and window rediscovery compose generic capture, the shared encoder, and `live-ws`. |
 | Orchestration | Nushell (`mod.nu`) | Launches pipelines, manages service lifecycle. |
 | Frontend | Svelte 5 + WebCodecs | Pure viewer. Receives `live-protocol` framed messages via WS. Zero H.264 knowledge. |
@@ -246,7 +246,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 |--------|-------------|
 | `just list` | List all available recipes |
 | `just compile-shaders` | Compile the entries in `shaders.toml` to SM5.0 `.fxo` bytecode with `fxc` |
-| `just run <name> [args]` | Run a `mod.nu` launcher such as `server`, `capture main`, `audio`, `kpm`, or `app` |
+| `just run <name> [args]` | Run a `mod.nu` launcher such as `server`, `capture`, `stream main`, `audio`, `kpm`, or `app` |
 | `just bun <args>` | Run Bun in `frontend/` |
 | `just tsc [args]` | Type-check the frontend with `bunx --bun tsc --noEmit` |
 | `just svc [args]` | Check Svelte components with `bunx --bun svelte-check` |
@@ -272,9 +272,9 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `run-server` | Launch `live-server` (builds first via `get-exe`) |
 | `run-app` | Launch `live-app` webview (builds + copies via `get-exe`) |
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
-| `run-capture preview [--config path]` | Launch the fixed-size local profile preview; defaults to ignored `data/live-capture.toml` |
-| `run-capture main [--config path]` | Launch `live-stream --mode main` with a local TOML, shared-texture cohort, and direct encoder-to-relay pipe |
-| `run-capture youtube-music` | Launch `live-stream --mode youtube-music` with title discovery, DPI crop policy, shared-texture cohort, and direct encoder-to-relay pipe |
+| `run-capture [--config path]` | Launch standalone `live-capture`; defaults to ignored `data/live-capture.toml` |
+| `run-stream main [--config path]` | Launch `live-stream --mode main` with a local TOML, shared-texture cohort, and direct encoder-to-relay pipe |
+| `run-stream youtube-music` | Launch `live-stream --mode youtube-music` with title discovery, DPI crop policy, shared-texture cohort, and direct encoder-to-relay pipe |
 | `run-audio [device]` | Launch the audio pipeline (`live-audio \| live-ws --mode audio`) |
 | `run-kpm` | Launch the KPM pipeline (`live-kpm \| live-ws`) |
 | `run-ccusage [--loop]` | Run `ccusage` once (default) or every 60s (`--loop`) and post today's Claude Code token + cost totals to the string store |
@@ -410,7 +410,7 @@ may run remotely without becoming a configuration authority.
 
 ```bash
 # Repository launcher
-just run capture main --config data/live-capture.toml
+just run stream main --config data/live-capture.toml
 
 # Direct main invocation; worker executables are normally resolved by mod.nu
 live-stream --mode main \
@@ -451,9 +451,9 @@ deterministic metadata label, while exclusions still veto the complete union.
 
 ```bash
 # Normally launched through the repository environment helper
-just run capture preview
+just run capture
 
-# Standalone invocation
+# Direct standalone invocation
 live-capture --config data/live-capture.toml \
   --width 1920 --height 1200 --title "Live Capture"
 
@@ -462,7 +462,7 @@ live-capture --config data/live-capture.toml > /dev/null
 
 # Managed profile output is headless in production
 live-capture --config data/live-capture.toml --width 1920 --height 1200 \
-  --no-preview --adapter-luid 0x... --shared-handle 0x...
+  --headless --adapter-luid 0x... --shared-handle 0x...
 ```
 
 The preview excludes its own HWND from selector matching. Focusing the preview
@@ -471,7 +471,7 @@ itself.
 
 The supervisor-only crop source uses `--hwnd` with a complete
 `--crop-min-x/y --crop-max-x/y` rectangle, exact padded output dimensions,
-`--no-preview`, and the inherited mailbox contract. Special-stream discovery
+`--headless`, and the inherited mailbox contract. Special-stream discovery
 and crop policy remain outside `live-capture`.
 
 `live-capture` intentionally does not depend on `live-encoder`; their only

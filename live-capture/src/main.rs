@@ -1,7 +1,7 @@
 //! `live-capture.exe` — safe standalone or managed GPU window capture.
 //!
-//! A local profile TOML selects allowed foreground windows for the primary
-//! public mode. The stream supervisor may instead provide one already-resolved
+//! A local profile TOML selects allowed foreground windows for standalone mode.
+//! The stream supervisor may instead provide one already-resolved
 //! HWND and crop rectangle for a policy it owns. Neither mode encodes or uses
 //! network transport.
 
@@ -50,9 +50,9 @@ use winit::{
     window::{Window, WindowButtons},
 };
 
-/// Default preview width in physical pixels.
+/// Default fixed output width in physical pixels.
 const DEFAULT_WIDTH: u32 = 1920;
-/// Default preview height in physical pixels.
+/// Default fixed output height in physical pixels.
 const DEFAULT_HEIGHT: u32 = 1200;
 /// Background used for letterboxing and periods without an active target.
 const CLEAR_COLOR: [f32; 4] = [41.0 / 255.0, 41.0 / 255.0, 41.0 / 255.0, 1.0];
@@ -93,11 +93,11 @@ struct Args {
     #[arg(long, requires_all = ["hwnd", "crop_min_x", "crop_min_y", "crop_max_x"])]
     crop_max_y: Option<u32>,
 
-    /// Fixed physical width of the preview client area.
+    /// Fixed physical output width, also used by the preview client area.
     #[arg(long, default_value_t = DEFAULT_WIDTH, value_parser = clap::value_parser!(u32).range(1..))]
     width: u32,
 
-    /// Fixed physical height of the preview client area.
+    /// Fixed physical output height, also used by the preview client area.
     #[arg(long, default_value_t = DEFAULT_HEIGHT, value_parser = clap::value_parser!(u32).range(1..))]
     height: u32,
 
@@ -105,9 +105,9 @@ struct Args {
     #[arg(long, default_value = "Live Capture")]
     title: String,
 
-    /// Keep the capture path headless; valid only with managed shared output.
+    /// Disable the preview window; valid only with managed shared output.
     #[arg(long, requires = "shared_handle")]
-    no_preview: bool,
+    headless: bool,
 
     /// Supervisor-owned NT shared-texture handle inherited by this process.
     #[arg(long, requires = "adapter_luid")]
@@ -164,7 +164,7 @@ fn resolve_source(args: &Args) -> anyhow::Result<CaptureSource> {
             Ok(CaptureSource::Profiles(config.clone())),
         (None, Some(hwnd), Some(min_x), Some(min_y), Some(max_x), Some(max_y)) => {
             anyhow::ensure!(args.shared_handle.is_some(), "crop capture requires managed shared output");
-            anyhow::ensure!(args.no_preview, "crop capture requires --no-preview");
+            anyhow::ensure!(args.headless, "crop capture requires --headless");
             anyhow::ensure!(max_x > min_x, "--crop-max-x must be greater than --crop-min-x");
             anyhow::ensure!(max_y > min_y, "--crop-max-y must be greater than --crop-min-y");
             let crop = CropBox { min_x, min_y, max_x, max_y };
@@ -231,7 +231,7 @@ fn run(args: Args) -> anyhow::Result<()> {
                         .with_title(args.title)
                         .with_inner_size(physical_size)
                         .with_resizable(false)
-                        .with_visible(!args.no_preview)
+                        .with_visible(!args.headless)
                         // Winit's drag/drop path calls `OleInitialize` for STA,
                         // which conflicts with the MTA required by WGC on this
                         // thread. The preview has no file-drop behavior.
@@ -283,10 +283,10 @@ fn run(args: Args) -> anyhow::Result<()> {
             };
 
             log::info!(
-                "capture started: {}x{}, preview={}, HWND=0x{:X}",
+                "capture started: {}x{}, headless={}, HWND=0x{:X}",
                 output_size.width,
                 output_size.height,
-                !args.no_preview,
+                args.headless,
                 preview_hwnd.0 as isize);
 
             let mut state = PreviewState {
@@ -299,7 +299,7 @@ fn run(args: Args) -> anyhow::Result<()> {
                 occluded: false,
                 managed: args.shared_handle.is_some(),
                 fixed_source,
-                preview_enabled: !args.no_preview,
+                preview_enabled: !args.headless,
                 window,
             };
 
@@ -532,7 +532,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn profile_source_is_the_primary_public_interface() {
+    fn profile_source_drives_standalone_mode() {
         let args = Args::try_parse_from([
             "live-capture",
             "--config",
@@ -556,7 +556,7 @@ mod tests {
             "--crop-max-y", "750",
             "--width", "1264",
             "--height", "80",
-            "--no-preview",
+            "--headless",
             "--shared-handle", "123",
             "--adapter-luid", "1",
         ]).unwrap();

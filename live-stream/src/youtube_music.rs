@@ -296,7 +296,7 @@ fn spawn_pipeline(
         .arg("--crop-max-y").arg(crop.max.y.to_string())
         .arg("--width").arg(output_size.width.to_string())
         .arg("--height").arg(output_size.height.to_string())
-        .arg("--no-preview")
+        .arg("--headless")
         .arg("--shared-handle").arg(capture_handle.to_string())
         .arg("--adapter-luid").arg(adapter.to_string())
         .stdin(Stdio::null())

@@ -186,12 +186,12 @@ export def --wrapped run-youtube-music [...args]: nothing -> nothing {
 
 # ── Capture and telemetry launchers ──
 
-# Preview the local capture policy without encoding or network transport.
-export def --wrapped "run-capture preview" [--config: path, ...args]: nothing -> nothing {
+# Run standalone capture without encoding or network transport.
+export def --wrapped run-capture [--config: path, ...args]: nothing -> nothing {
     # Keep the ignored personal example as the convenient default while still
     # allowing an explicit profile file as the first positional argument.
     let config_path = $config | default ($REPO_ROOT | path join "data" "live-capture.toml")
-    (^(get-exe "live-capture" --copy "preview")
+    (^(get-exe "live-capture" --copy "standalone")
         --config $config_path
         ...$args)
 }
@@ -200,7 +200,7 @@ export def --wrapped "run-capture preview" [--config: path, ...args]: nothing ->
 # live-stream owns the encoder-to-relay pipe, resource-generation recovery,
 # Job Object containment, and metadata posting. Selector policy remains a local
 # TOML carried with this invocation and interpreted only by live-capture.
-export def --wrapped "run-capture main" [--config: path, ...args]: nothing -> nothing {
+export def --wrapped "run-stream main" [--config: path, ...args]: nothing -> nothing {
     get-url | ignore
     let config_path = $config | default ($REPO_ROOT | path join "data" "live-capture.toml")
     let capture_path = get-exe "live-capture" --copy "main"
@@ -221,7 +221,7 @@ export def --wrapped "run-capture main" [--config: path, ...args]: nothing -> no
 
 # Start the supervised YouTube Music crop stream. The supervisor owns window
 # discovery, DPI-aware crop policy, the generic crop encoder, and relay restarts.
-export def --wrapped "run-capture youtube-music" [...args]: nothing -> nothing {
+export def --wrapped "run-stream youtube-music" [...args]: nothing -> nothing {
     get-url | ignore
     let capture_path = get-exe "live-capture" --copy "youtube-music"
     let encoder_path = get-exe "live-encoder" --copy "youtube-music"

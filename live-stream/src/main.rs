@@ -623,7 +623,7 @@ fn spawn_capture(
         .arg("--config").arg(&config.capture_config)
         .arg("--width").arg(config.size.width.to_string())
         .arg("--height").arg(config.size.height.to_string())
-        .arg("--no-preview")
+        .arg("--headless")
         .arg("--shared-handle").arg(handle.to_string())
         .arg("--adapter-luid").arg(adapter.to_string())
         .stdin(Stdio::null())
