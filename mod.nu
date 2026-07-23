@@ -190,7 +190,7 @@ export def --wrapped run-youtube-music [...args]: nothing -> nothing {
 export def --wrapped "run-capture preview" [--config: path, ...args]: nothing -> nothing {
     # Keep the ignored personal example as the convenient default while still
     # allowing an explicit profile file as the first positional argument.
-    let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
+    let config_path = $config | default ($REPO_ROOT | path join "data" "live-capture.toml")
     (^(get-exe "live-capture" --copy "preview")
         --config $config_path
         ...$args)
@@ -202,7 +202,7 @@ export def --wrapped "run-capture preview" [--config: path, ...args]: nothing ->
 # TOML carried with this invocation and interpreted only by live-capture.
 export def --wrapped "run-capture main" [--config: path, ...args]: nothing -> nothing {
     get-url | ignore
-    let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
+    let config_path = $config | default ($REPO_ROOT | path join "data" "live-capture.toml")
     let capture_path = get-exe "live-capture" --copy "main"
     let encoder_path = get-exe "live-encoder" --copy "main"
     let relay_path = get-exe "live-ws" --copy "main"

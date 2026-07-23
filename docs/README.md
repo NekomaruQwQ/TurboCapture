@@ -58,11 +58,11 @@ This project is not semantically versioned. Instead, we track **milestones** (Mx
 |-----------|-------------|---------------------|
 | **M0** | Prototype | Auto-selector only — first proof of concept |
 | **M1** | Monolith | Single Rust/wry process: capture + encoding + HTTP + webview |
-| **M2** | Client-Server (TS) | TS server (Hono/Bun) + Rust capture children + React frontend + Rust webview host |
+| **M2** | Client-Server (TS) | TS server (Hono/Bun) + Rust capture children + Svelte frontend + Rust webview host |
 | **M3** | Client-Server (Rust) | Full RIIR — Rust server (Axum) replaces TS server |
 | **M4** | Microservice | Stdout-first Rust capture workers → `live-ws` relay → Rust server (Axum). **Current architecture.** |
 
-**This document describes M4.** For the design journey from M3 to M4, see [`M4-DESIGN.md`](M4-DESIGN.md).
+**This document describes M4.** For the design journey from M3 to M4, see [`ARCHIVE-M4-DESIGN.md`](ARCHIVE-M4-DESIGN.md).
 
 ---
 
@@ -183,7 +183,7 @@ the livestream stack.
 
 ### Why Rust for the Server?
 
-The initial M4 design chose a TypeScript server (Bun/Hono) because the three M3 RIIR rationales no longer applied in a microservice architecture (see [`M4-DESIGN.md` § Why TypeScript Again](M4-DESIGN.md#why-typescript-again)).  During implementation, the balance tipped back to Rust.
+The initial M4 design chose a TypeScript server (Bun/Hono) because the three M3 RIIR rationales no longer applied in a microservice architecture (see [`ARCHIVE-M4-DESIGN.md` § Why TypeScript Again](ARCHIVE-M4-DESIGN.md#why-typescript-again)).  During implementation, the balance tipped back to Rust.
 
 **What changed:** the "opaque relay" assumption broke down.  The server's `/init` endpoint must parse CodecParams and build `avc1.*` codec strings + avcC descriptors — the same logic in `live-protocol/src/avcc.rs`.  In TypeScript this meant maintaining `codec.ts` as a hand-written mirror (~100 lines) that had to stay in sync.  In Rust, the server calls `live-protocol` directly — zero duplication.
 
@@ -193,7 +193,7 @@ The initial M4 design chose a TypeScript server (Bun/Hono) because the three M3 
 | Native Vite integration | `vite_proxy.rs` from M3 already solves this — a Rust reverse proxy to the Vite dev server. |
 | No binary parsing | Not true — `codec.ts` duplicated `live-protocol` for the `/init` endpoint. |
 | WS ergonomics | Overstated — Axum's `WebSocketUpgrade` extractor + `tokio::sync::broadcast` handles the relay fan-out pattern cleanly. |
-| Portfolio (full-stack TS) | Frontend is still React/TypeScript/Bun, so the project remains hybrid. |
+| Portfolio (full-stack TS) | Frontend is still Svelte/TypeScript/Bun, so the project remains hybrid. |
 
 **The decisive gain:** single toolchain.  `cargo build --release` builds every binary in the project.  No Bun, no `node_modules`, no second package manager for the server.
 
@@ -244,19 +244,21 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 
 | Recipe | Description |
 |--------|-------------|
+| `just list` | List all available recipes |
 | `just compile-shaders` | Compile the entries in `shaders.toml` to SM5.0 `.fxo` bytecode with `fxc` |
-| `just install` | Build all Rust binaries (`cargo build -r`) + install frontend deps (`bun i`) |
-| `just server` | Start the Axum server (requires `LIVE_PORT`, `LIVE_VITE_PORT`) |
-| `just run capture preview` | Preview the local safe-capture policy without encoding |
-| `just run capture main` | Start the profile-driven supervised main stream |
-| `just run capture youtube-music` | Start the supervised YouTube Music shared-texture stream |
-| `just kpm` | Start the keystroke counter pipeline |
-| `just audio` | Start the audio capture pipeline |
-| `just app` | Launch the webview host |
-| `just youtube-music` | Launch YouTube Music in a webview |
-| `just http <method> <path>` | HTTP request helper (e.g. `just http get /api/strings`) |
+| `just run <name> [args]` | Run a `mod.nu` launcher such as `server`, `capture main`, `audio`, `kpm`, or `app` |
+| `just bun <args>` | Run Bun in `frontend/` |
+| `just tsc [args]` | Type-check the frontend with `bunx --bun tsc --noEmit` |
+| `just svc [args]` | Check Svelte components with `bunx --bun svelte-check` |
+| `just cargo <command> [args]` | Compile shaders, then run the requested Cargo command with `--release` |
 | `just push [bookmark] [revision]` | Move a jj bookmark and push to GitHub |
 | `just pull [bookmark]` | Fetch from GitHub and create a new working copy |
+| `just get <path> [args]` | Make an HTTP GET request |
+| `just put <path> <data> [args]` | Make an HTTP PUT request |
+| `just post <path> <data> [args]` | Make an HTTP POST request |
+| `just refresh` | Ask the server to reload its configuration |
+| `just get-string` | Fetch the complete string store |
+| `just set-string <key> <value>` | Set one string-store entry |
 
 #### `mod.nu` Exported Commands
 
@@ -270,7 +272,7 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `run-server` | Launch `live-server` (builds first via `get-exe`) |
 | `run-app` | Launch `live-app` webview (builds + copies via `get-exe`) |
 | `run-youtube-music` | Launch YouTube Music webview (builds + copies via `get-exe`) |
-| `run-capture preview [--config path]` | Launch the fixed-size local profile preview; defaults to ignored `data/selector-new.toml` |
+| `run-capture preview [--config path]` | Launch the fixed-size local profile preview; defaults to ignored `data/live-capture.toml` |
 | `run-capture main [--config path]` | Launch `live-stream --mode main` with a local TOML, shared-texture cohort, and direct encoder-to-relay pipe |
 | `run-capture youtube-music` | Launch `live-stream --mode youtube-music` with title discovery, DPI crop policy, shared-texture cohort, and direct encoder-to-relay pipe |
 | `run-audio [device]` | Launch the audio pipeline (`live-audio \| live-ws --mode audio`) |
@@ -408,12 +410,12 @@ may run remotely without becoming a configuration authority.
 
 ```bash
 # Repository launcher
-just run capture main --config data/selector-new.toml
+just run capture main --config data/live-capture.toml
 
 # Direct main invocation; worker executables are normally resolved by mod.nu
 live-stream --mode main \
   --capture live-capture.exe --encoder live-encoder.exe --relay live-ws.exe \
-  --config data/selector-new.toml \
+  --config data/live-capture.toml \
   --server ws://host/internal/streams/main \
   --info-url http://host/internal/streams/main/info
 
@@ -452,14 +454,14 @@ deterministic metadata label, while exclusions still veto the complete union.
 just run capture preview
 
 # Standalone invocation
-live-capture --config data/selector-new.toml \
+live-capture --config data/live-capture.toml \
   --width 1920 --height 1200 --title "Live Capture"
 
 # Preview without retaining JSONL diagnostics
-live-capture --config data/selector-new.toml > /dev/null
+live-capture --config data/live-capture.toml > /dev/null
 
 # Managed profile output is headless in production
-live-capture --config data/selector-new.toml --width 1920 --height 1200 \
+live-capture --config data/live-capture.toml --width 1920 --height 1200 \
   --no-preview --adapter-luid 0x... --shared-handle 0x...
 ```
 
@@ -728,7 +730,7 @@ new-window frame traversing capture, NVENC, and WebSocket.
 
 ### Widgets
 
-The left column of the UI hosts **widgets** — small status indicators built from a shared `LiveWidget` component (`frontend/src/widgets/common.tsx`).
+The left column of the UI hosts **widgets** — small status indicators built from a shared `LiveWidget` component (`frontend/src/widgets/LiveWidget.svelte`).
 
 #### Layout
 
@@ -801,8 +803,12 @@ LiveUI/
 │
 ├── docs/
 │   ├── README.md                    # This document
-│   ├── M4-DESIGN.md                # M4 architecture design & journey
-│   └── ARCHIVE-LIVE-STREAM.md      # Completed capture/video/supervisor refactor
+│   ├── README-Audio.md              # Audio capture and playback notes
+│   ├── PLAN-UI-AudioMeter.md        # Audio meter UI plan
+│   ├── ARCHIVE-M0-Prototype.md      # Initial prototype history
+│   ├── ARCHIVE-M4-DESIGN.md         # M4 architecture design & journey
+│   ├── ARCHIVE-M4-KPMMeter.md       # Completed KPM meter plan
+│   └── ARCHIVE-M4-StreamSupervisor.md # Completed capture/video/supervisor refactor
 │
 ├── data/                            # Persisted runtime data (gitignored)
 │   ├── strings.json                 # String store key-value pairs
@@ -833,7 +839,7 @@ LiveUI/
 │       ├── converter.rs             # GPU BGRA→NV12 via ID3D11VideoProcessor
 │       ├── d3d11.rs                 # Encoder-private texture allocation
 │       ├── encoder.rs               # NVENC H.264 async MFT
-│       ├── encoder/                 # NVENC helpers (debug, finder)
+│       ├── encoder/                 # NVENC helpers (debug, helper)
 │       └── pipeline.rs              # Shared BGRA → private copy → NV12/NVENC/AVCC/stdout
 │
 ├── live-audio/                      # WASAPI audio capture → stdout (Rust)
@@ -869,6 +875,7 @@ LiveUI/
 │       ├── strings.rs               # String store (file-backed + computed) + legacy /api/strings/ws (superseded by events_ws)
 │       ├── events.rs                # Backward-compatible stream lifecycle/selection metadata
 │       ├── events_ws.rs             # Unified /api/events WS — multiplexes KPM + strings
+│       ├── util.rs                  # Shared poisoned-lock recovery helper
 │       └── vite_proxy.rs            # Reverse proxy to Vite dev server
 │
 ├── live-app/                        # Optional webview host (wry)
@@ -880,9 +887,11 @@ LiveUI/
 │
 ├── frontend/                        # Frontend (Svelte 5 + Vite + Tailwind)
 │   ├── package.json
+│   ├── svelte.config.ts
 │   ├── vite.config.ts
+│   ├── vite.d.ts
 │   ├── index.html
-│   ├── index.tsx                    # Entry point (Svelte 5 mount)
+│   ├── index.ts                     # Entry point (Svelte 5 mount)
 │   └── src/
 │       ├── App.svelte               # Pure viewer shell (JetBrains Islands dark theme)
 │       ├── KpmMeter.svelte          # Vertical VU-style KPM meter (peak hold + decay)
@@ -894,8 +903,8 @@ LiveUI/
 │       │   ├── AudioStream.svelte   # <AudioStream> (WS push, live-protocol parser, AudioContext)
 │       │   ├── worklet.ts           # AudioWorklet PCM ring buffer processor
 │       │   └── worklet-env.d.ts     # Ambient types for AudioWorklet context
-│       ├── components/              # Reusable presentational primitives (Grid, Icon, Marquee)
-│       ├── widgets/                 # Left-column widgets (Clock, LiveMode, Capture, About)
+│       ├── components/              # Reusable Svelte primitives (Grid, Icon, Marquee)
+│       ├── widgets/                 # LiveWidget + Clock, LiveMode, ClaudeUsage, and About widgets
 │       └── video/
 │           ├── StreamRenderer.svelte  # <StreamRenderer> (canvas + color-key)
 │           ├── stream-loop.ts         # WS reader → live-protocol parser → decoder

@@ -165,7 +165,7 @@ after reconnecting.
 
 ## Selector Configuration
 
-`data/selector-new.toml` is the ignored working example used to design the new
+`data/live-capture.toml` is the ignored working example used to design the new
 schema. Personal executable paths remain outside version control. The public
 shape is:
 
@@ -314,7 +314,7 @@ the current end-to-end behavior remains available during migration.
 ### Phase 0 — Documentation and contracts (Complete)
 
 - Record the target architecture in this plan and the main README.
-- Treat `data/selector-new.toml` as ignored design input rather than a file to
+- Treat `data/live-capture.toml` as ignored design input rather than a file to
   commit.
 - Agree on ownership, config semantics, shared-resource invariants, and failure
   boundaries before moving code.

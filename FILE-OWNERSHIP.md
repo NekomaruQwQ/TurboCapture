@@ -15,9 +15,12 @@ Cargo.toml                                  human
 FILE-OWNERSHIP.md                           human
 frontend/package.json                       human
 frontend/tsconfig.json                      human
+frontend/svelte.config.ts                   human
 frontend/vite.config.ts                     human
+frontend/vite.d.ts                          human
+shaders.toml                                human
 
-## Config.toml files
+## Cargo.toml files
 live-app/Cargo.toml                         human
 live-audio/Cargo.toml                       human
 live-protocol/Cargo.toml                    human
@@ -32,12 +35,11 @@ crates/enumerate-windows/Cargo.toml         human
 crates/set-dpi-awareness/Cargo.toml         human
 
 ## docs/
-ARCHIVE-0-Prototype.md                      agent
-ARCHIVE-1-StreamID.md                       agent
-M4-DESIGN.md                                agent
+ARCHIVE-M0-Prototype.md                     agent
+ARCHIVE-M4-DESIGN.md                        agent
+ARCHIVE-M4-KPMMeter.md                      agent
+ARCHIVE-M4-StreamSupervisor.md              agent
 PLAN-UI-AudioMeter.md                       agent
-PLAN-UI-KPMMeter.md                         agent
-ARCHIVE-LIVE-STREAM.md                      agent
 README.md                                   agent
 README-Audio.md                             agent
 
@@ -86,6 +88,7 @@ src/d3d11.rs                                agent
 src/encoder.rs                              agent
 src/encoder/debug.rs                        agent
 src/encoder/helper.rs                       agent
+src/pipeline.rs                             agent
 
 ## live-kpm/
 src/main.rs                                 agent
@@ -101,6 +104,8 @@ src/audio.rs                                agent
 src/kpm.rs                                  agent
 src/strings.rs                              agent
 src/events.rs                               agent
+src/events_ws.rs                            agent
+src/util.rs                                 agent
 src/vite_proxy.rs                           agent
 
 ## crates/enumerate-windows/
@@ -110,7 +115,7 @@ src/main.rs                                 agent
 ## crates/set-dpi-awareness/
 src/lib.rs                                  human
 
-# == React frontend ==
+# == Svelte frontend ==
 
 ## frontend/
 debug.ts                                    human
@@ -118,32 +123,36 @@ global.css                                  human
 global.effects.css                          human
 global.tailwind.css                         human
 index.html                                  human
-index.tsx                                   human
+index.ts                                    human
 
 ## frontend/src/
 api.ts                                      agent
-streams.ts                                  agent
-strings.ts                                  agent
-strings-api.ts                              agent
+events.svelte.ts                            agent
+streams.svelte.ts                           agent
 ws.ts                                       agent
-app.tsx                                     human
-kpm.tsx                                     agent
+App.svelte                                  human
+KpmMeter.svelte                             agent
 
 ## frontend/src/audio/
-index.tsx                                   agent
+AudioStream.svelte                          agent
 worklet.ts                                  agent
 worklet-env.d.ts                            agent
 
 ## frontend/src/components/
-grid.tsx                                    human
-marquee.tsx                                 agent
+Grid.svelte                                 human
+Icon.svelte                                 human
+Marquee.svelte                              agent
 
 ## frontend/src/widgets/
-common.tsx                                  human
-index.tsx                                   human
+AboutWidget.svelte                          human
+ClaudeUsageWidget.svelte                    human
+ClockWidget.svelte                          human
+LiveModeWidget.svelte                       human
+LiveWidget.svelte                           human
 
 ## frontend/src/video/
 color-key.ts                                agent
 decoder.ts                                  agent
-index.tsx                                   agent
+stream-loop.ts                              agent
+StreamRenderer.svelte                       agent
 ```
