@@ -65,7 +65,7 @@ impl SharedPublisher {
         handle: InheritedHandle,
         output_size: Size2D<u32>,
         clear_color: [f32; 4],
-        abandon_after_publications: Option<u64>) -> anyhow::Result<Self> {
+        debug_abandon_after_acquisitions: Option<u64>) -> anyhow::Result<Self> {
         let mailbox = OpenedMailbox::open(device, &handle, output_size)?;
         drop(handle);
         let render_target = d3d11::create_rtv_for_texture_2d(device, &mailbox.texture)
@@ -77,7 +77,7 @@ impl SharedPublisher {
                 .context("failed to create managed-output resampler")?,
             clear_color,
             metrics: PublicationMetrics::new(),
-            abandonment_fault: abandon_after_publications.map(AbandonmentFault::new),
+            abandonment_fault: debug_abandon_after_acquisitions.map(AbandonmentFault::new),
         };
         publisher.publish_initial_clear(context)?;
         Ok(publisher)

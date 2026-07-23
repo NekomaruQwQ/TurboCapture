@@ -117,9 +117,9 @@ struct Args {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     duration_seconds: Option<u64>,
 
-    /// Inject one capture-worker exit while holding the producer keyed mutex.
+    /// Debug-only capture-worker abandonment count for hardware recovery verification.
     #[arg(long, hide = true, value_parser = clap::value_parser!(u64).range(1..))]
-    fault_abandon_capture_after_publications: Option<u64>,
+    debug_abandon_capture_after_acquisitions: Option<u64>,
 }
 
 /// Validated immutable main-stream configuration shared by every generation.
@@ -140,8 +140,8 @@ struct MainConfig {
     size: Size2D<u32>,
     /// Fixed encoder frame rate.
     fps: u32,
-    /// One-shot keyed-mutex abandonment count used by hardware verification.
-    abandonment_fault: Option<u64>,
+    /// One-shot debug acquisition count used by keyed-mutex hardware verification.
+    debug_abandon_after_acquisitions: Option<u64>,
 }
 
 /// Fully validated mode-specific invocation.
@@ -240,7 +240,8 @@ fn validate_args(args: Args) -> anyhow::Result<ValidatedMode> {
                     stream_id,
                     size: Size2D::new(width, height),
                     fps,
-                    abandonment_fault: args.fault_abandon_capture_after_publications,
+                    debug_abandon_after_acquisitions:
+                        args.debug_abandon_capture_after_acquisitions,
                 },
                 info_url,
             })
@@ -251,7 +252,7 @@ fn validate_args(args: Args) -> anyhow::Result<ValidatedMode> {
                     && args.info_url.is_none()
                     && args.width.is_none()
                     && args.height.is_none()
-                    && args.fault_abandon_capture_after_publications.is_none(),
+                    && args.debug_abandon_capture_after_acquisitions.is_none(),
                 "config, metadata, dimensions, and capture fault options require --mode main");
             let title = args.youtube_music_title
                 .context("--youtube-music-title is required for --mode youtube-music")?;
@@ -401,7 +402,7 @@ impl MainSupervisor {
         let abandonment_fault = if self.abandonment_fault_consumed {
             None
         } else {
-            self.config.abandonment_fault
+            self.config.debug_abandon_after_acquisitions
         };
         let capture = spawn_capture(
             &self.config,
@@ -613,7 +614,7 @@ fn spawn_capture(
     mailbox: &mut OwnedMailbox,
     generation: u64,
     metadata: MetadataPoster,
-    abandonment_fault: Option<u64>) -> anyhow::Result<CaptureProcess> {
+    debug_abandon_after_acquisitions: Option<u64>) -> anyhow::Result<CaptureProcess> {
     let adapter = mailbox.device_bundle().adapter_luid;
     let inheritance = mailbox.inheritable_handle()?;
     let handle = inheritance.value();
@@ -628,9 +629,9 @@ fn spawn_capture(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    if let Some(after) = abandonment_fault {
+    if let Some(after) = debug_abandon_after_acquisitions {
         command
-            .arg("--fault-abandon-after-publications")
+            .arg("--debug-abandon-after-acquisitions")
             .arg(after.to_string());
     }
     let mut child = command

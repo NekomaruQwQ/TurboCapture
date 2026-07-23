@@ -117,9 +117,16 @@ struct Args {
     #[arg(long, requires = "shared_handle")]
     adapter_luid: Option<AdapterLuid>,
 
-    /// Exit while owning the producer mutex after this many real publications.
+    /// Debug-only hardware fault injection for keyed-mutex recovery.
+    ///
+    /// Counts successful producer acquisitions for real captured frames; the
+    /// initial clear and non-blocking acquisition misses do not count. On the
+    /// requested acquisition, the process exits before publishing the frame or
+    /// releasing producer key 0. This deliberately makes the encoder observe
+    /// `WAIT_ABANDONED` so the supervisor's full resource-generation recovery
+    /// can be verified; it is not an operational capture setting.
     #[arg(long, hide = true, requires = "shared_handle", value_parser = clap::value_parser!(u64).range(1..))]
-    fault_abandon_after_publications: Option<u64>,
+    debug_abandon_after_acquisitions: Option<u64>,
 }
 
 /// Validated capture-source policy chosen before any GPU resource is created.
@@ -250,7 +257,7 @@ fn run(args: Args) -> anyhow::Result<()> {
                     handle.into_owned(),
                     output_size,
                     CLEAR_COLOR,
-                    args.fault_abandon_after_publications)
+                    args.debug_abandon_after_acquisitions)
                     .map_err(|error| ResourceGenerationLost::new(format!(
                         "failed to initialize managed shared output: {error:#}")))
                     .unwrap_or_else(|error| exit_worker(error.into(), true)));
