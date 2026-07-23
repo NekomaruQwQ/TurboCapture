@@ -1,8 +1,7 @@
 //! `live-stream` — process and resource supervisor for one video stream.
 //!
-//! Main mode owns the shared-texture GPU cohort. YouTube Music mode owns fixed
-//! window discovery and crop orchestration. Both wire encoder stdout directly
-//! into `live-ws` stdin without parsing media frames.
+//! Both modes own a capture/shared-texture/encoder GPU cohort and wire encoder
+//! stdout directly into `live-ws` stdin without parsing media frames.
 
 mod metadata;
 mod restart;
@@ -21,7 +20,7 @@ use anyhow::Context as _;
 use clap::{Parser, ValueEnum};
 use euclid::default::Size2D;
 use live_shared_texture::OwnedMailbox;
-use metadata::{MetadataPoster, spawn_selector_reader};
+use metadata::{MetadataPoster, spawn_capture_reader};
 use restart::{Component, RecoveryScope, RestartBackoff, recovery_scope};
 use win32job::{ExtendedLimitInfo, Job};
 
@@ -31,7 +30,7 @@ const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// User-facing stream topologies owned exclusively by the supervisor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum StreamMode {
-    /// Local profile selector, shared-texture encoder, and video relay.
+    /// Local profile capture, shared-texture encoder, and video relay.
     Main,
     /// YouTube Music window discovery, generic crop encoder, and video relay.
     YoutubeMusic,
@@ -66,9 +65,9 @@ struct Args {
     #[arg(long, value_enum, default_value = "main")]
     mode: StreamMode,
 
-    /// Built `live-selector` executable required by main mode.
+    /// Built `live-capture` executable.
     #[arg(long)]
-    selector: Option<PathBuf>,
+    capture: PathBuf,
 
     /// Built `live-encoder` executable.
     #[arg(long)]
@@ -118,21 +117,21 @@ struct Args {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     duration_seconds: Option<u64>,
 
-    /// Inject one selector exit while holding the producer keyed mutex.
+    /// Inject one capture-worker exit while holding the producer keyed mutex.
     #[arg(long, hide = true, value_parser = clap::value_parser!(u64).range(1..))]
-    fault_abandon_selector_after_publications: Option<u64>,
+    fault_abandon_capture_after_publications: Option<u64>,
 }
 
 /// Validated immutable main-stream configuration shared by every generation.
 struct MainConfig {
-    /// Canonical selector executable path.
-    selector: PathBuf,
+    /// Canonical capture executable path.
+    capture: PathBuf,
     /// Canonical encoder executable path.
     encoder: PathBuf,
     /// Canonical relay executable path.
     relay: PathBuf,
-    /// Canonical local TOML path passed directly to every selector generation.
-    selector_config: PathBuf,
+    /// Canonical local TOML path passed directly to every capture generation.
+    capture_config: PathBuf,
     /// Relay WebSocket destination.
     server: String,
     /// Well-known stream identifier.
@@ -147,7 +146,7 @@ struct MainConfig {
 
 /// Fully validated mode-specific invocation.
 enum ValidatedMode {
-    /// Safe profile selector and shared-texture cohort.
+    /// Safe profile capture and shared-texture cohort.
     Main {
         /// Resource and worker configuration.
         config: MainConfig,
@@ -210,6 +209,7 @@ fn validate_args(args: Args) -> anyhow::Result<ValidatedMode> {
         args.server.starts_with("ws://") || args.server.starts_with("wss://"),
         "--server must be a ws:// or wss:// URL");
     let encoder = canonical_file(&args.encoder, "encoder executable")?;
+    let capture = canonical_file(&args.capture, "capture executable")?;
     let relay = canonical_file(&args.relay, "relay executable")?;
     let fps = args.fps.unwrap_or_else(|| args.mode.default_fps());
 
@@ -228,38 +228,36 @@ fn validate_args(args: Args) -> anyhow::Result<ValidatedMode> {
             anyhow::ensure!(
                 info_url.starts_with("http://") || info_url.starts_with("https://"),
                 "--info-url must be an http:// or https:// URL");
-            let selector = args.selector
-                .context("--selector is required for --mode main")?;
-            let selector_config = args.config
+            let capture_config = args.config
                 .context("--config is required for --mode main")?;
             Ok(ValidatedMode::Main {
                 config: MainConfig {
-                    selector: canonical_file(&selector, "selector executable")?,
+                    capture,
                     encoder,
                     relay,
-                    selector_config: canonical_file(&selector_config, "selector config")?,
+                    capture_config: canonical_file(&capture_config, "capture config")?,
                     server: args.server,
                     stream_id,
                     size: Size2D::new(width, height),
                     fps,
-                    abandonment_fault: args.fault_abandon_selector_after_publications,
+                    abandonment_fault: args.fault_abandon_capture_after_publications,
                 },
                 info_url,
             })
         }
         StreamMode::YoutubeMusic => {
             anyhow::ensure!(
-                args.selector.is_none()
-                    && args.config.is_none()
+                args.config.is_none()
                     && args.info_url.is_none()
                     && args.width.is_none()
                     && args.height.is_none()
-                    && args.fault_abandon_selector_after_publications.is_none(),
-                "selector, config, metadata, dimensions, and selector fault options require --mode main");
+                    && args.fault_abandon_capture_after_publications.is_none(),
+                "config, metadata, dimensions, and capture fault options require --mode main");
             let title = args.youtube_music_title
                 .context("--youtube-music-title is required for --mode youtube-music")?;
             anyhow::ensure!(!title.is_empty(), "YouTube Music title prefix must not be empty");
             Ok(ValidatedMode::YoutubeMusic(youtube_music::Config {
+                capture,
                 encoder,
                 relay,
                 server: args.server,
@@ -294,7 +292,7 @@ fn create_containment_job() -> anyhow::Result<Job> {
 struct MainSupervisor {
     /// Immutable worker paths and stream settings.
     config: MainConfig,
-    /// Non-media metadata poster shared with selector stdout readers.
+    /// Non-media metadata poster shared with capture stdout readers.
     metadata: MetadataPoster,
     /// Monotonic resource-generation identifier.
     generation: u64,
@@ -302,17 +300,17 @@ struct MainSupervisor {
     generation_started: Instant,
     /// Current mailbox; declared before children so children drop first.
     mailbox: Option<OwnedMailbox>,
-    /// Safe selector process and JSONL reader.
-    selector: Option<SelectorProcess>,
+    /// Safe capture process and JSONL reader.
+    capture: Option<CaptureProcess>,
     /// Encoder plus its directly connected relay.
     pipeline: Option<EncoderRelay>,
-    /// Selector-local consecutive failure policy.
-    selector_backoff: RestartBackoff,
+    /// Capture-local consecutive failure policy.
+    capture_backoff: RestartBackoff,
     /// Encoder/relay consecutive failure policy.
     pipeline_backoff: RestartBackoff,
     /// Complete-resource consecutive failure policy.
     generation_backoff: RestartBackoff,
-    /// Whether the optional selector abandonment hook has already been launched.
+    /// Whether the optional capture abandonment hook has already been launched.
     abandonment_fault_consumed: bool,
 }
 
@@ -325,9 +323,9 @@ impl MainSupervisor {
             generation: 0,
             generation_started: Instant::now(),
             mailbox: None,
-            selector: None,
+            capture: None,
             pipeline: None,
-            selector_backoff: RestartBackoff::default(),
+            capture_backoff: RestartBackoff::default(),
             pipeline_backoff: RestartBackoff::default(),
             generation_backoff: RestartBackoff::default(),
             abandonment_fault_consumed: false,
@@ -370,7 +368,7 @@ impl MainSupervisor {
                     observed.component.name(),
                     observed.status);
                 match scope {
-                    RecoveryScope::Selector => self.restart_selector(observed.stable_for)?,
+                    RecoveryScope::Capture => self.restart_capture(observed.stable_for)?,
                     RecoveryScope::EncoderRelay => self.restart_pipeline(observed.stable_for)?,
                     RecoveryScope::ResourceGeneration => {
                         self.restart_generation(self.generation_started.elapsed())?;
@@ -405,7 +403,7 @@ impl MainSupervisor {
         } else {
             self.config.abandonment_fault
         };
-        let selector = spawn_selector(
+        let capture = spawn_capture(
             &self.config,
             &mut mailbox,
             generation,
@@ -415,26 +413,26 @@ impl MainSupervisor {
         let pipeline = spawn_pipeline(&self.config, &mut mailbox, generation)?;
 
         self.mailbox = Some(mailbox);
-        self.selector = Some(selector);
+        self.capture = Some(capture);
         self.pipeline = Some(pipeline);
         self.generation_started = Instant::now();
-        self.selector_backoff.reset();
+        self.capture_backoff.reset();
         self.pipeline_backoff.reset();
         Ok(())
     }
 
     /// Return the first observed child exit without waiting on a healthy peer.
     fn poll_exit(&mut self) -> anyhow::Result<Option<ObservedExit>> {
-        if let Some(selector) = self.selector.as_mut()
-            && let Some(status) = selector
+        if let Some(capture) = self.capture.as_mut()
+            && let Some(status) = capture
                 .child
                 .try_wait()
-                .context("failed to query live-selector status")?
+                .context("failed to query live-capture status")?
         {
             return Ok(Some(ObservedExit {
-                component: Component::Selector,
+                component: Component::Capture,
                 status,
-                stable_for: selector.started.elapsed(),
+                stable_for: capture.started.elapsed(),
             }));
         }
         if let Some(pipeline) = self.pipeline.as_mut() {
@@ -465,28 +463,28 @@ impl MainSupervisor {
     }
 
     /// Restart only capture while retaining the complete mailbox and media pipe.
-    fn restart_selector(&mut self, mut stable_for: Duration) -> anyhow::Result<()> {
-        drop(self.selector.take());
+    fn restart_capture(&mut self, mut stable_for: Duration) -> anyhow::Result<()> {
+        drop(self.capture.take());
         loop {
             let delay = next_delay(
-                &mut self.selector_backoff,
+                &mut self.capture_backoff,
                 stable_for,
-                "live-selector")?;
+                "live-capture")?;
             thread::sleep(delay);
-            let result = spawn_selector(
+            let result = spawn_capture(
                 &self.config,
-                self.mailbox.as_mut().context("selector restart has no mailbox")?,
+                self.mailbox.as_mut().context("capture restart has no mailbox")?,
                 self.generation,
                 self.metadata.clone(),
                 None);
             match result {
-                Ok(selector) => {
-                    self.selector = Some(selector);
+                Ok(capture) => {
+                    self.capture = Some(capture);
                     return Ok(());
                 }
                 Err(error) => {
                     log::error!(
-                        "@{} generation {}: selector restart failed: {error:#}",
+                        "@{} generation {}: capture restart failed: {error:#}",
                         self.config.stream_id,
                         self.generation);
                     stable_for = Duration::ZERO;
@@ -526,7 +524,7 @@ impl MainSupervisor {
 
     /// Drop every GPU-dependent worker and retry with a newly selected adapter.
     fn restart_generation(&mut self, mut stable_for: Duration) -> anyhow::Result<()> {
-        drop(self.selector.take());
+        drop(self.capture.take());
         drop(self.pipeline.take());
         drop(self.mailbox.take());
         loop {
@@ -571,17 +569,17 @@ struct ObservedExit {
     stable_for: Duration,
 }
 
-/// Selector process plus the thread draining its unconditional JSONL stdout.
-struct SelectorProcess {
-    /// Managed selector child.
+/// Capture process plus the thread draining its unconditional JSONL stdout.
+struct CaptureProcess {
+    /// Managed capture child.
     child: Child,
-    /// Time this selector attempt became live.
+    /// Time this capture attempt became live.
     started: Instant,
     /// Reader exits after the child closes its stdout pipe.
     reader: Option<thread::JoinHandle<()>>,
 }
 
-impl Drop for SelectorProcess {
+impl Drop for CaptureProcess {
     fn drop(&mut self) {
         terminate(&mut self.child);
         if let Some(reader) = self.reader.take() {
@@ -609,21 +607,22 @@ impl Drop for EncoderRelay {
     }
 }
 
-/// Launch a selector with the mailbox inheritable only during this exact spawn.
-fn spawn_selector(
+/// Launch profile capture with the mailbox inheritable only during this spawn.
+fn spawn_capture(
     config: &MainConfig,
     mailbox: &mut OwnedMailbox,
     generation: u64,
     metadata: MetadataPoster,
-    abandonment_fault: Option<u64>) -> anyhow::Result<SelectorProcess> {
+    abandonment_fault: Option<u64>) -> anyhow::Result<CaptureProcess> {
     let adapter = mailbox.device_bundle().adapter_luid;
     let inheritance = mailbox.inheritable_handle()?;
     let handle = inheritance.value();
-    let mut command = Command::new(&config.selector);
+    let mut command = Command::new(&config.capture);
     command
-        .arg("--config").arg(&config.selector_config)
+        .arg("--config").arg(&config.capture_config)
         .arg("--width").arg(config.size.width.to_string())
         .arg("--height").arg(config.size.height.to_string())
+        .arg("--no-preview")
         .arg("--shared-handle").arg(handle.to_string())
         .arg("--adapter-luid").arg(adapter.to_string())
         .stdin(Stdio::null())
@@ -638,16 +637,16 @@ fn spawn_selector(
         .spawn()
         .with_context(|| format!(
             "generation {generation}: failed to launch {}",
-            config.selector.display()))?;
+            config.capture.display()))?;
     if let Err(error) = inheritance.revoke() {
         terminate(&mut child);
-        return Err(error).context("failed to revoke mailbox inheritance after selector spawn");
+        return Err(error).context("failed to revoke mailbox inheritance after capture spawn");
     }
     let Some(stdout) = child.stdout.take() else {
         terminate(&mut child);
-        anyhow::bail!("generation {generation}: selector stdout pipe was not created");
+        anyhow::bail!("generation {generation}: capture stdout pipe was not created");
     };
-    let reader = match spawn_selector_reader(
+    let reader = match spawn_capture_reader(
         stdout,
         generation,
         StreamMode::Main.name(),
@@ -660,10 +659,10 @@ fn spawn_selector(
         }
     };
     log::info!(
-        "@{} generation {generation}: launched live-selector pid={}",
+        "@{} generation {generation}: launched live-capture pid={}",
         config.stream_id,
         child.id());
-    Ok(SelectorProcess {
+    Ok(CaptureProcess {
         child,
         started: Instant::now(),
         reader: Some(reader),
@@ -679,7 +678,6 @@ fn spawn_pipeline(
     let inheritance = mailbox.inheritable_handle()?;
     let handle = inheritance.value();
     let mut encoder = Command::new(&config.encoder)
-        .arg("--mode").arg("shared")
         .arg("--width").arg(config.size.width.to_string())
         .arg("--height").arg(config.size.height.to_string())
         .arg("--fps").arg(config.fps.to_string())

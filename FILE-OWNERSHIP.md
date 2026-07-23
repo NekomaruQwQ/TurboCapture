@@ -21,7 +21,7 @@ frontend/vite.config.ts                     human
 live-app/Cargo.toml                         human
 live-audio/Cargo.toml                       human
 live-protocol/Cargo.toml                    human
-live-selector/Cargo.toml                    human
+live-capture/Cargo.toml                     human
 live-ws/Cargo.toml                          human
 live-encoder/Cargo.toml                     human
 live-kpm/Cargo.toml                         human
@@ -37,7 +37,7 @@ ARCHIVE-1-StreamID.md                       agent
 M4-DESIGN.md                                agent
 PLAN-UI-AudioMeter.md                       agent
 PLAN-UI-KPMMeter.md                         agent
-PLAN-LIVE-STREAM.md                         agent
+ARCHIVE-LIVE-STREAM.md                      agent
 README.md                                   agent
 README-Audio.md                             agent
 
@@ -64,7 +64,7 @@ src/metadata.rs                             agent
 src/restart.rs                              agent
 src/youtube_music.rs                        agent
 
-## live-selector/
+## live-capture/
 src/main.rs                                 agent
 src/presenter.rs                            agent
 src/publisher.rs                            agent
@@ -77,21 +77,15 @@ src/selector/config.rs                      agent
 
 ## crates/live-shared-texture/
 src/lib.rs                                  agent
-src/bin/live-texture-proof.rs               agent
 
 ## live-encoder/
 src/main.rs                                 agent
 src/lib.rs                                  agent
-src/capture.rs                              agent
 src/converter.rs                            agent
 src/d3d11.rs                                agent
 src/encoder.rs                              agent
 src/encoder/debug.rs                        agent
 src/encoder/helper.rs                       agent
-src/resample.hlsl                           human
-src/resample.rs                             human
-src/selector/mod.rs                         agent
-src/selector/config.rs                      agent
 
 ## live-kpm/
 src/main.rs                                 agent
@@ -106,7 +100,6 @@ src/video.rs                                agent
 src/audio.rs                                agent
 src/kpm.rs                                  agent
 src/strings.rs                              agent
-src/selector.rs                             agent
 src/events.rs                               agent
 src/vite_proxy.rs                           agent
 

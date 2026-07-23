@@ -1,7 +1,8 @@
 //! YouTube Music stream discovery, crop calculation, and process supervision.
 //!
 //! This module owns the only special-stream policy in the media pipeline. The
-//! encoder receives a generic HWND and absolute crop rectangle, while `live-ws`
+//! capture worker receives a generic HWND and absolute crop rectangle. The
+//! encoder receives only the resulting fixed shared texture, while `live-ws`
 //! receives only the normal stream transport arguments.
 
 use std::{
@@ -13,6 +14,7 @@ use std::{
 
 use anyhow::Context as _;
 use euclid::default::{Box2D, Point2D, Size2D, Vector2D};
+use live_shared_texture::OwnedMailbox;
 use windows::Win32::{
     Foundation::{HWND, RECT},
     UI::{
@@ -32,7 +34,9 @@ const PADDING: f32 = 2.0;
 
 /// Validated immutable configuration for the fixed crop topology.
 pub struct Config {
-    /// Canonical generic encoder executable path.
+    /// Canonical generic capture executable path.
+    pub capture: PathBuf,
+    /// Canonical shared-texture encoder executable path.
     pub encoder: PathBuf,
     /// Canonical relay executable path.
     pub relay: PathBuf,
@@ -42,7 +46,7 @@ pub struct Config {
     pub stream_id: String,
     /// Window title prefix used only by supervisor discovery.
     pub title: String,
-    /// Generic crop encoder frame rate.
+    /// Encoded output frame rate.
     pub fps: u32,
     /// Delay between window discovery attempts while unavailable.
     pub poll_interval: Duration,
@@ -89,7 +93,7 @@ impl Supervisor {
 
             if let Some(observed) = self.poll_exit()? {
                 log::warn!(
-                    "@{}: {} exited with {}; restarting crop pipeline",
+                    "@{}: {} exited with {}; restarting shared-texture cohort",
                     self.config.stream_id,
                     observed.component,
                     observed.status);
@@ -97,7 +101,7 @@ impl Supervisor {
                 let delay = next_delay(
                     &mut self.pipeline_backoff,
                     observed.stable_for,
-                    "YouTube Music encoder/live-ws")?;
+                    "YouTube Music capture/encoder/live-ws")?;
                 thread::sleep(delay);
             } else {
                 thread::sleep(CHILD_POLL_INTERVAL);
@@ -133,8 +137,8 @@ impl Supervisor {
                 let delay = next_delay(
                     &mut self.pipeline_backoff,
                     Duration::ZERO,
-                    "YouTube Music encoder/live-ws")?;
-                log::error!("@{}: crop pipeline startup failed: {error:#}", self.config.stream_id);
+                    "YouTube Music capture/encoder/live-ws")?;
+                log::error!("@{}: shared cohort startup failed: {error:#}", self.config.stream_id);
                 thread::sleep(delay);
                 Ok(true)
             }
@@ -144,6 +148,15 @@ impl Supervisor {
     /// Observe one pipe endpoint without waiting on its healthy peer.
     fn poll_exit(&mut self) -> anyhow::Result<Option<ObservedExit>> {
         let Some(pipeline) = self.pipeline.as_mut() else { return Ok(None) };
+        if let Some(status) = pipeline.capture.try_wait()
+            .context("failed to query YouTube Music capture status")?
+        {
+            return Ok(Some(ObservedExit {
+                component: "live-capture",
+                status,
+                stable_for: pipeline.started.elapsed(),
+            }));
+        }
         if let Some(status) = pipeline.encoder.try_wait()
             .context("failed to query YouTube Music encoder status")?
         {
@@ -176,22 +189,27 @@ struct ObservedExit {
     stable_for: Duration,
 }
 
-/// Generic crop encoder and its directly connected transport worker.
+/// Generic capture, shared encoder, direct transport worker, and mailbox owner.
 struct Pipeline {
-    /// Transitional generic HWND/crop producer.
+    /// Generic HWND/crop producer.
+    capture: Child,
+    /// Shared-texture consumer and encoded stdout producer.
     encoder: Child,
     /// Direct stdin consumer and WebSocket reconnect worker.
     relay: Child,
     /// Common creation time for backoff stability.
     started: Instant,
+    /// Shared texture kept alive until every child has been reaped.
+    _mailbox: OwnedMailbox,
 }
 
 impl Drop for Pipeline {
     fn drop(&mut self) {
-        // Close the reader first so a writer observes the broken pipe, then
-        // reap both workers before rediscovering the target window.
+        // Close the pipe reader first, then reap every GPU worker before the
+        // mailbox field is released and window geometry is rediscovered.
         terminate(&mut self.relay);
         terminate(&mut self.encoder);
+        terminate(&mut self.capture);
     }
 }
 
@@ -258,27 +276,74 @@ fn crop_rect_for_client(client_size: Size2D<u32>, dpi: u32) -> anyhow::Result<Bo
         client_crop.max + frame_offset))
 }
 
-/// Launch the generic crop encoder and attach its stdout directly to the relay.
+/// Launch one crop/shared-texture/encoder cohort and direct encoder stdout to the relay.
 fn spawn_pipeline(
     config: &Config,
     hwnd: usize,
     crop: Box2D<u32>) -> anyhow::Result<Pipeline> {
-    let mut encoder = Command::new(&config.encoder)
-        .arg("--mode").arg("crop")
+    let output_size = encoder_output_size(crop);
+    let mut mailbox = OwnedMailbox::new(output_size)
+        .context("failed to create YouTube Music shared mailbox")?;
+    let adapter = mailbox.device_bundle().adapter_luid;
+
+    let capture_inheritance = mailbox.inheritable_handle()?;
+    let capture_handle = capture_inheritance.value();
+    let mut capture = Command::new(&config.capture)
         .arg("--hwnd").arg(hwnd.to_string())
         .arg("--crop-min-x").arg(crop.min.x.to_string())
         .arg("--crop-min-y").arg(crop.min.y.to_string())
         .arg("--crop-max-x").arg(crop.max.x.to_string())
         .arg("--crop-max-y").arg(crop.max.y.to_string())
+        .arg("--width").arg(output_size.width.to_string())
+        .arg("--height").arg(output_size.height.to_string())
+        .arg("--no-preview")
+        .arg("--shared-handle").arg(capture_handle.to_string())
+        .arg("--adapter-luid").arg(adapter.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("failed to launch {}", config.capture.display()))?;
+    if let Err(error) = capture_inheritance.revoke() {
+        terminate(&mut capture);
+        return Err(error).context("failed to revoke mailbox inheritance after capture spawn");
+    }
+
+    let encoder_inheritance = match mailbox.inheritable_handle() {
+        Ok(inheritance) => inheritance,
+        Err(error) => {
+            terminate(&mut capture);
+            return Err(error).context("failed to prepare mailbox inheritance for encoder");
+        }
+    };
+    let encoder_handle = encoder_inheritance.value();
+    let mut encoder = match Command::new(&config.encoder)
+        .arg("--width").arg(output_size.width.to_string())
+        .arg("--height").arg(output_size.height.to_string())
         .arg("--fps").arg(config.fps.to_string())
         .arg("--stream-id").arg(&config.stream_id)
+        .arg("--shared-handle").arg(encoder_handle.to_string())
+        .arg("--adapter-luid").arg(adapter.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .with_context(|| format!("failed to launch {}", config.encoder.display()))?;
+    {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            let _ = encoder_inheritance.revoke();
+            terminate(&mut capture);
+            return Err(error).with_context(|| format!("failed to launch {}", config.encoder.display()));
+        }
+    };
+    if let Err(error) = encoder_inheritance.revoke() {
+        terminate(&mut encoder);
+        terminate(&mut capture);
+        return Err(error).context("failed to revoke mailbox inheritance after encoder spawn");
+    }
     let Some(encoded_stdout) = encoder.stdout.take() else {
         terminate(&mut encoder);
+        terminate(&mut capture);
         anyhow::bail!("YouTube Music encoder stdout pipe was not created");
     };
     let relay = match Command::new(&config.relay)
@@ -293,19 +358,38 @@ fn spawn_pipeline(
         Ok(relay) => relay,
         Err(error) => {
             terminate(&mut encoder);
+            terminate(&mut capture);
             return Err(error).with_context(|| format!("failed to launch {}", config.relay.display()));
         }
     };
     log::info!(
-        "@{}: HWND 0x{hwnd:X}, crop=({},{})..({},{}) -> live-encoder pid={} -> live-ws pid={}",
+        "@{}: HWND 0x{hwnd:X}, crop=({},{})..({},{}) -> {}x{} shared texture on adapter {}; live-capture pid={} -> live-encoder pid={} -> live-ws pid={}",
         config.stream_id,
         crop.min.x,
         crop.min.y,
         crop.max.x,
         crop.max.y,
+        output_size.width,
+        output_size.height,
+        adapter,
+        capture.id(),
         encoder.id(),
         relay.id());
-    Ok(Pipeline { encoder, relay, started: Instant::now() })
+    Ok(Pipeline {
+        capture,
+        encoder,
+        relay,
+        started: Instant::now(),
+        _mailbox: mailbox,
+    })
+}
+
+/// Round native crop dimensions up to the encoder's 16-pixel alignment.
+fn encoder_output_size(crop: Box2D<u32>) -> Size2D<u32> {
+    let crop_size = crop.size();
+    Size2D::new(
+        (crop_size.width + 15) & !15,
+        (crop_size.height + 15) & !15)
 }
 
 #[cfg(test)]
@@ -330,5 +414,11 @@ mod tests {
     fn crop_geometry_rejects_windows_smaller_than_the_known_layout() {
         let error = crop_rect_for_client(Size2D::new(20, 20), 96).unwrap_err();
         assert!(error.to_string().contains("too small"));
+    }
+
+    #[test]
+    fn crop_output_is_padded_for_the_shared_encoder_contract() {
+        let crop = Box2D::new(Point2D::new(2, 682), Point2D::new(1262, 750));
+        assert_eq!(encoder_output_size(crop), Size2D::new(1264, 80));
     }
 }

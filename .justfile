@@ -46,8 +46,6 @@ post path data *args:
 # Trigger the server to refresh its configuration.
 refresh:
     just post "/api/refresh" ""
-set-preset name:
-    just put "/api/selector/preset" "{{name}}"
 get-string:
     just get "/api/strings"
 set-string key value:

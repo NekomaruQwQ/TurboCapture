@@ -1,9 +1,4 @@
-//! Preview-owned D3D11 device and texture-view helpers.
-//!
-//! These helpers intentionally start from the original `live-capture`
-//! implementation (now `live-encoder`),
-//! but are local so preview adapter selection and presentation requirements can
-//! diverge from the encoder without creating a shared compatibility contract.
+//! Capture-owned D3D11 device and texture-view helpers.
 
 use nkcore::debug::*;
 use nkcore::prelude::*;

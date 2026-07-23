@@ -1343,7 +1343,7 @@ name = "live-app"
 version = "0.1.0"
 dependencies = [
  "clap",
- "nkcore",
+ "nkcore-windows",
  "winit",
  "wry",
 ]
@@ -1361,26 +1361,40 @@ dependencies = [
 ]
 
 [[package]]
-name = "live-encoder"
+name = "live-capture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "enumerate-windows",
- "live-protocol",
  "live-shared-texture",
  "log",
- "nkcore",
- "pretty-name",
+ "nkcore-windows",
  "pretty_env_logger",
  "serde",
  "serde_json",
  "set-dpi-awareness",
- "ureq",
+ "toml",
  "widestring",
  "win32-version-info",
  "windows 0.62.2",
+ "winit",
  "winrt-capture",
+]
+
+[[package]]
+name = "live-encoder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "live-protocol",
+ "live-shared-texture",
+ "log",
+ "nkcore-windows",
+ "pretty_env_logger",
+ "widestring",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -1398,28 +1412,6 @@ dependencies = [
 [[package]]
 name = "live-protocol"
 version = "0.1.0"
-
-[[package]]
-name = "live-selector"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "enumerate-windows",
- "live-shared-texture",
- "log",
- "nkcore",
- "pretty_env_logger",
- "serde",
- "serde_json",
- "set-dpi-awareness",
- "toml",
- "widestring",
- "win32-version-info",
- "windows 0.62.2",
- "winit",
- "winrt-capture",
-]
 
 [[package]]
 name = "live-server"
@@ -1445,10 +1437,8 @@ name = "live-shared-texture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "euclid",
  "log",
- "pretty_env_logger",
  "windows 0.62.2",
 ]
 
@@ -1587,15 +1577,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
-name = "nkcore"
-version = "0.1.0"
-dependencies = [
- "nkcore-base",
- "nkcore-debug",
- "nkcore-windows",
-]
-
-[[package]]
 name = "nkcore-base"
 version = "0.1.0"
 dependencies = [
@@ -1629,6 +1610,8 @@ dependencies = [
 name = "nkcore-windows"
 version = "0.1.0"
 dependencies = [
+ "nkcore-base",
+ "nkcore-debug",
  "pretty_env_logger",
  "raw-window-handle",
  "windows 0.62.2",
@@ -3840,7 +3823,7 @@ dependencies = [
 name = "winrt-capture"
 version = "0.1.0"
 dependencies = [
- "nkcore",
+ "nkcore-windows",
  "windows 0.62.2",
 ]
 

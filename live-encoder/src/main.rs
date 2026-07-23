@@ -1,39 +1,22 @@
-//! `live-encoder.exe` — transitional screen capture + H.264 encoding to stdout.
+//! `live-encoder.exe` — fixed shared BGRA texture to H.264 on stdout.
 //!
-//! Captures a window by HWND, encodes with NVENC, and writes
-//! `live-protocol` framed binary messages to stdout.  Pipe through
-//! `live-ws` for WebSocket delivery to the server.
-//!
-//! Four exclusive input modes:
-//! - **Base** (default): scales the full window to `--width x --height`.
-//! - **Crop**: extracts an absolute subrect via `--crop-min-x/y --crop-max-x/y`.
-//! - **Auto**: (Phase 2) foreground polling + hot-swap capture session.
-//! - **Shared**: opens a supervisor-owned BGRA texture and encodes private copies.
-//!
-//! ## Usage
-//!
-//! ```text
-//! # Base mode — capture + encode to stdout, pipe through live-ws
-//! live-encoder --hwnd 0x1A2B --width 1920 --height 1200 \
-//!   | live-ws --mode video --server ws://machineA:3000/internal/streams/main
-//!
-//! # Dump to file for testing (production code path)
-//! live-encoder --hwnd 0x1A2B --width 1920 --height 1200 > dump.bin
-//!
-//! # Utility modes
-//! live-encoder --enumerate-windows
-//! live-encoder --foreground-window
-//! ```
+//! The worker has no window, selection, crop, or network policy. A supervisor
+//! supplies one inherited shared-texture handle and the exact adapter contract;
+//! encoded output remains `live-protocol` framing suitable for piping directly
+//! into `live-ws`.
 
-use live_encoder::{
-    capture::{self, CaptureSession, CropBox},
-    d3d11,
-    pipeline::{BgraTextureInput, DEFAULT_BITRATE, VideoEncoderConfig, spawn_stdout_encoder},
-    resample::Resampler,
-    selector,
+use std::{
+    io::Write as _,
+    sync::Mutex,
 };
 
 use clap::Parser;
+use live_encoder::pipeline::{
+    BgraTextureInput,
+    DEFAULT_BITRATE,
+    VideoEncoderConfig,
+    spawn_stdout_encoder,
+};
 use live_shared_texture::{
     AdapterLuid,
     RESOURCE_GENERATION_LOST_EXIT_CODE,
@@ -41,308 +24,45 @@ use live_shared_texture::{
     SharedHandleValue,
     is_resource_generation_lost,
 };
-use nkcore::prelude::*;
 use nkcore::prelude::euclid::Size2D;
 
-use std::io::Write as _;
-use std::sync::Mutex;
-use std::thread;
-use std::time::Duration;
-
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::System::Com::*;
-
-/// Default capture resolution for auto mode.
-const DEFAULT_WIDTH: u32 = 1920;
-const DEFAULT_HEIGHT: u32 = 1200;
-
-// ── CLI ─────────────────────────────────────────────────────────────────────
-
-/// Transitional legacy screen capture + H.264 encoding to stdout.
+/// Fixed managed-input and encoder settings.
 #[derive(Parser)]
-#[command(name = "live-encoder")]
-struct CliArgs {
-    /// Input mode: base (default), auto, crop, or shared texture.
-    #[arg(long, value_parser = parse_capture_mode_arg, default_value = "base")]
-    mode: CaptureModeArg,
+#[command(name = "live-encoder", about = "Encode a managed shared BGRA texture to stdout")]
+struct Args {
+    /// Fixed input width, which must be a multiple of 16.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    width: u32,
 
-    /// Window handle (decimal or 0x hex). Required for base and crop modes.
-    #[arg(long, value_parser = parse_hwnd)]
-    hwnd: Option<isize>,
-
-    // ── Resample args (base mode) ─────────────────────────────────────────
-
-    /// Output width (must be a multiple of 16).
-    #[arg(long, conflicts_with_all = ["crop_min_x", "crop_min_y", "crop_max_x", "crop_max_y"])]
-    width: Option<u32>,
-
-    /// Output height (must be a multiple of 16).
-    #[arg(long, conflicts_with_all = ["crop_min_x", "crop_min_y", "crop_max_x", "crop_max_y"])]
-    height: Option<u32>,
-
-    // ── Crop args ─────────────────────────────────────────────────────────
-
-    /// Left edge of the crop rect (inclusive), in source pixels.
-    #[arg(long, requires_all = ["crop_min_y", "crop_max_x", "crop_max_y"],
-        conflicts_with_all = ["width", "height"])]
-    crop_min_x: Option<u32>,
-
-    /// Top edge of the crop rect (inclusive), in source pixels.
-    #[arg(long, requires_all = ["crop_min_x", "crop_max_x", "crop_max_y"],
-        conflicts_with_all = ["width", "height"])]
-    crop_min_y: Option<u32>,
-
-    /// Right edge of the crop rect (exclusive), in source pixels.
-    #[arg(long, requires_all = ["crop_min_x", "crop_min_y", "crop_max_y"],
-        conflicts_with_all = ["width", "height"])]
-    crop_max_x: Option<u32>,
-
-    /// Bottom edge of the crop rect (exclusive), in source pixels.
-    #[arg(long, requires_all = ["crop_min_x", "crop_min_y", "crop_max_x"],
-        conflicts_with_all = ["width", "height"])]
-    crop_max_y: Option<u32>,
-
-    // ── Auto mode args ────────────────────────────────────────────────────
-
-    /// URL to poll for selector config (GET, returns JSON).
-    /// Required for --mode auto.
-    #[arg(long)]
-    config_url: Option<String>,
-
-    /// URL to POST stream info periodically.
-    /// Required for --mode auto.
-    #[arg(long)]
-    info_url: Option<String>,
-
-    // ── Managed shared-texture mode ─────────────────────────────────────
+    /// Fixed input height, which must be a multiple of 16.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    height: u32,
 
     /// Supervisor-owned NT shared-texture handle inherited by this process.
-    #[arg(long, requires = "adapter_luid")]
-    shared_handle: Option<SharedHandleValue>,
+    #[arg(long)]
+    shared_handle: SharedHandleValue,
 
-    /// DXGI adapter LUID selected by the supervisor for the managed GPU cohort.
-    #[arg(long, requires = "shared_handle")]
-    adapter_luid: Option<AdapterLuid>,
+    /// DXGI adapter LUID selected by the supervisor for the GPU cohort.
+    #[arg(long)]
+    adapter_luid: AdapterLuid,
 
-    // ── Common args ───────────────────────────────────────────────────────
-
-    /// Encoder frame rate (1-60).
+    /// Encoder frame rate.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=60))]
     fps: u32,
 
-    /// Background clear color for the staging texture, as 6-digit hex `RRGGBB`.
-    /// Visible in letterboxed regions and on the first few frames before
-    /// capture content arrives. Default `292929` ≈ the previous `0.16` gray.
-    #[arg(long, default_value = "292929", value_parser = parse_clear_color)]
-    clear_color: [f32; 4],
-
-    /// Stream ID tag for log output.
+    /// Stream identifier included only in diagnostics.
     #[arg(long)]
     stream_id: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CaptureModeArg { Base, Auto, Crop, Shared }
-
-fn parse_capture_mode_arg(s: &str) -> Result<CaptureModeArg, String> {
-    match s {
-        "base" => Ok(CaptureModeArg::Base),
-        "auto" => Ok(CaptureModeArg::Auto),
-        "crop" => Ok(CaptureModeArg::Crop),
-        "shared" => Ok(CaptureModeArg::Shared),
-        other => Err(format!("unknown mode '{other}' (expected 'base', 'auto', 'crop', or 'shared')")),
-    }
-}
-
-/// Resolved capture mode after CLI validation.
-#[derive(Clone, Copy)]
-enum CaptureMode {
-    /// Scale the full window to fit `width x height` with letterboxing.
-    Resample { width: u32, height: u32 },
-    /// Extract an absolute subrect at native resolution.
-    Crop(CropBox),
-    /// Auto-selector: foreground polling + hot-swap (resolution is fixed).
-    Auto { width: u32, height: u32 },
-    /// Supervisor-owned shared BGRA input (resolution is fixed).
-    Shared { width: u32, height: u32 },
-}
-
-// ── CLI parsers ─────────────────────────────────────────────────────────────
-
-/// Parses a window handle from decimal (`12345`) or hex (`0x1A2B3C`).
-fn parse_hwnd(s: &str) -> Result<isize, String> {
-    let value =
-        s
-            .strip_prefix("0x")
-            .map_or_else(|| s.parse(), |hex| isize::from_str_radix(hex, 16));
-    let value = value.map_err(|e| format!("invalid HWND '{s}': {e}"))?;
-    if value == 0 {
-        Err("HWND must be non-zero".into())
-    } else {
-        Ok(value)
-    }
-}
-
-/// Parses a 6-digit unprefixed hex color `RRGGBB` into RGBA floats with
-/// alpha=1.0. Each byte is mapped to `byte / 255.0`, matching how the value
-/// lands in the `B8G8R8A8_UNORM` staging texture.
-fn parse_clear_color(s: &str) -> Result<[f32; 4], String> {
-    if s.len() != 6 {
-        return Err(format!("clear color must be 6 hex digits 'RRGGBB' (got '{s}')"));
-    }
-    let bytes = u32::from_str_radix(s, 16)
-        .map_err(|e| format!("invalid clear color '{s}': {e}"))?;
-    let r = ((bytes >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((bytes >> 8)  & 0xFF) as f32 / 255.0;
-    let b = ( bytes        & 0xFF) as f32 / 255.0;
-    Ok([r, g, b, 1.0])
-}
-
-/// Validate and resolve the CLI args into a `CaptureMode`.
-fn resolve_capture_mode(args: &CliArgs) -> anyhow::Result<CaptureMode> {
-    if args.mode != CaptureModeArg::Shared {
-        anyhow::ensure!(
-            args.shared_handle.is_none() && args.adapter_luid.is_none(),
-            "--shared-handle and --adapter-luid require --mode shared");
-    }
-    match args.mode {
-        CaptureModeArg::Auto => {
-            let w = args.width.unwrap_or(DEFAULT_WIDTH);
-            let h = args.height.unwrap_or(DEFAULT_HEIGHT);
-            anyhow::ensure!(
-                w.is_multiple_of(16) && h.is_multiple_of(16),
-                "width and height must be multiples of 16 (got {w}x{h})");
-            Ok(CaptureMode::Auto { width: w, height: h })
-        }
-        CaptureModeArg::Crop => {
-            let (Some(min_x), Some(min_y), Some(max_x), Some(max_y)) =
-                (args.crop_min_x, args.crop_min_y, args.crop_max_x, args.crop_max_y)
-            else {
-                anyhow::bail!("crop mode requires --crop-min-x/y --crop-max-x/y");
-            };
-            anyhow::ensure!(args.hwnd.is_some(), "crop mode requires --hwnd");
-            anyhow::ensure!(max_x > min_x, "crop-max-x ({max_x}) must be greater than crop-min-x ({min_x})");
-            anyhow::ensure!(max_y > min_y, "crop-max-y ({max_y}) must be greater than crop-min-y ({min_y})");
-            Ok(CaptureMode::Crop(CropBox { min_x, min_y, max_x, max_y }))
-        }
-        CaptureModeArg::Base => {
-            let (Some(w), Some(h)) = (args.width, args.height) else {
-                anyhow::bail!("base mode requires --width and --height");
-            };
-            anyhow::ensure!(args.hwnd.is_some(), "base mode requires --hwnd");
-            anyhow::ensure!(
-                w.is_multiple_of(16) && h.is_multiple_of(16),
-                "width and height must be multiples of 16 (got {w}x{h})");
-            Ok(CaptureMode::Resample { width: w, height: h })
-        }
-        CaptureModeArg::Shared => {
-            let (Some(width), Some(height)) = (args.width, args.height) else {
-                anyhow::bail!("shared mode requires --width and --height");
-            };
-            anyhow::ensure!(args.shared_handle.is_some(), "shared mode requires --shared-handle");
-            anyhow::ensure!(args.adapter_luid.is_some(), "shared mode requires --adapter-luid");
-            anyhow::ensure!(
-                width.is_multiple_of(16) && height.is_multiple_of(16),
-                "width and height must be multiples of 16 (got {width}x{height})");
-            Ok(CaptureMode::Shared { width, height })
-        }
-    }
-}
-
-// ── Logging ─────────────────────────────────────────────────────────────────
-
-/// Set up dual-output logging:
-/// - Encoder init diagnostics (info/debug/trace from `live_encoder::encoder`)
-///   go to `live-encoder.log` next to the executable.
-/// - Warnings and errors from encoder code still go to stderr.
-/// - Everything else goes to stderr as usual.
-fn init_logger(stream_id: Option<String>) {
-    use pretty_env_logger::env_logger::fmt::Color;
-
-    let encoder_log_file: Option<Mutex<std::fs::File>> = {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("live-encoder.log")))
-            .and_then(|p| std::fs::File::create(p).ok())
-            .map(Mutex::new)
-    };
-
-    let tag = stream_id.map_or_else(String::new, |id| format!(" @{id}"));
-
-    pretty_env_logger::env_logger::Builder::from_env(
-        pretty_env_logger::env_logger::Env::default().default_filter_or("info"))
-        .format(move |buf, record| {
-            let is_encoder = record.target().starts_with("live_encoder::encoder");
-            let is_diagnostic = record.level() >= log::Level::Info;
-            if is_encoder && is_diagnostic
-                && let Some(ref file) = encoder_log_file {
-                    let mut f = file.lock().unwrap();
-                    writeln!(f, "[{}{tag} {}] {}", record.level(), record.target(), record.args())?;
-                    drop(f);
-                    return Ok(());
-                }
-
-            let level = buf.default_styled_level(record.level());
-            let mut tag_style = buf.style();
-            tag_style.set_color(Color::Cyan).set_bold(true);
-            let mut target_style = buf.style();
-            target_style.set_color(Color::Black).set_bold(true);
-
-            writeln!(buf, " {level} {} {} > {}",
-                tag_style.value(&tag),
-                target_style.value(record.target()),
-                record.args())
-        })
-        .init();
-}
-
-// ── Entry point ─────────────────────────────────────────────────────────────
-
 fn main() {
-    let _ = set_dpi_awareness::per_monitor_v2();
-
-    let args = CliArgs::parse();
+    let args = Args::parse();
     init_logger(args.stream_id.clone());
-
-    let mode = match resolve_capture_mode(&args) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let result = match mode {
-        CaptureMode::Auto { width, height } => {
-            let config_url = args.config_url.unwrap_or_else(|| {
-                eprintln!("error: --mode auto requires --config-url");
-                std::process::exit(1);
-            });
-            let info_url = args.info_url.unwrap_or_else(|| {
-                eprintln!("error: --mode auto requires --info-url");
-                std::process::exit(1);
-            });
-            run_auto(width, height, args.fps, args.clear_color, config_url, info_url)
-        }
-        CaptureMode::Shared { width, height } => run_shared(
-            width,
-            height,
-            args.fps,
-            args.shared_handle.expect("shared mode validates its handle"),
-            args.adapter_luid.expect("shared mode validates its adapter")),
-        legacy_mode => {
-            let hwnd = args.hwnd.expect("base/crop modes require --hwnd");
-            run(hwnd, legacy_mode, args.fps, args.clear_color)
-        }
-    };
-
-    if let Err(error) = result {
+    if let Err(error) = validate_dimensions(args.width, args.height)
+        .and_then(|()| run(&args))
+    {
         eprintln!("fatal: {error:#}");
-        let exit_code = if matches!(mode, CaptureMode::Shared { .. })
-            && is_resource_generation_lost(&error)
-        {
+        let exit_code = if is_resource_generation_lost(&error) {
             RESOURCE_GENERATION_LOST_EXIT_CODE
         } else {
             1
@@ -351,32 +71,35 @@ fn main() {
     }
 }
 
-/// Encode a private copy of the supervisor-owned shared BGRA mailbox.
-fn run_shared(
-    width: u32,
-    height: u32,
-    frame_rate: u32,
-    shared_handle: SharedHandleValue,
-    adapter_luid: AdapterLuid) -> anyhow::Result<()> {
-    let frame_size = Size2D::new(width, height);
-    let bundle = live_shared_texture::create_device_on_adapter(adapter_luid, true)
+/// Reject dimensions that the existing NV12 and H.264 path cannot represent.
+fn validate_dimensions(width: u32, height: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        width.is_multiple_of(16) && height.is_multiple_of(16),
+        "width and height must be multiples of 16 (got {width}x{height})");
+    Ok(())
+}
+
+/// Encode private copies consumed from the supervisor-owned latest-frame mailbox.
+fn run(args: &Args) -> anyhow::Result<()> {
+    let frame_size = Size2D::new(args.width, args.height);
+    let bundle = live_shared_texture::create_device_on_adapter(args.adapter_luid, true)
         .map_err(|error| ResourceGenerationLost::new(format!(
             "failed to create encoder device on supervisor-selected adapter: {error:#}")))?;
     log::info!(
-        "shared mode: input={}x{}, adapter={} ({})",
-        width,
-        height,
+        "shared input: {}x{}, adapter={} ({})",
+        args.width,
+        args.height,
         bundle.adapter_luid,
         bundle.adapter_name);
     let input = BgraTextureInput::from_shared(
         bundle.device,
         bundle.context,
-        shared_handle.into_owned(),
+        args.shared_handle.into_owned(),
         frame_size)
         .map_err(|error| ResourceGenerationLost::new(format!(
             "failed to open supervisor shared texture: {error:#}")))?;
     let encoding_handle = spawn_stdout_encoder(input, VideoEncoderConfig {
-        frame_rate,
+        frame_rate: args.fps,
         bitrate: DEFAULT_BITRATE,
     })?;
     encoding_handle
@@ -384,313 +107,61 @@ fn run_shared(
         .map_err(|_panic_payload| anyhow::anyhow!("encoding thread panicked"))?
 }
 
-#[expect(clippy::too_many_lines, reason = "main capture loop and encoding thread are necessarily long and complex")]
-fn run(hwnd: isize, mode: CaptureMode, frame_rate: u32, clear_color: [f32; 4]) -> anyhow::Result<()> {
-    // SAFETY: Called once at the start of the main thread before any COM usage.
-    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+/// Keep verbose Media Foundation discovery beside the executable while normal
+/// lifecycle logs remain visible on stderr without corrupting protocol stdout.
+fn init_logger(stream_id: Option<String>) {
+    use pretty_env_logger::env_logger::fmt::Color;
+
+    let encoder_log_file: Option<Mutex<std::fs::File>> = std::env::current_exe()
         .ok()
-        .context("CoInitializeEx failed")?;
+        .and_then(|path| path.parent().map(|directory| directory.join("live-encoder.log")))
+        .and_then(|path| std::fs::File::create(path).ok())
+        .map(Mutex::new);
+    let tag = stream_id.map_or_else(String::new, |id| format!(" @{id}"));
 
-    let hwnd_handle = HWND(hwnd as _);
+    pretty_env_logger::env_logger::Builder::from_env(
+        pretty_env_logger::env_logger::Env::default().default_filter_or("info"))
+        .format(move |buffer, record| {
+            let is_encoder = record.target().starts_with("live_encoder::encoder");
+            let is_diagnostic = record.level() >= log::Level::Info;
+            if is_encoder
+                && is_diagnostic
+                && let Some(file) = encoder_log_file.as_ref()
+            {
+                let mut file = file.lock().expect("encoder diagnostic log mutex was poisoned");
+                writeln!(
+                    file,
+                    "[{}{tag} {}] {}",
+                    record.level(),
+                    record.target(),
+                    record.args())?;
+                drop(file);
+                return Ok(());
+            }
 
-    let (_, device, device_context) =
-        d3d11::create_device()
-            .context("failed to create D3D11 device")?;
-
-    let mut capture =
-        CaptureSession::from_hwnd(&device, hwnd_handle)
-            .context("failed to start capture session")?;
-
-    let (frame_size, crop_box) = match mode {
-        CaptureMode::Resample { width, height } => {
-            let size = Size2D::new(width, height);
-            log::info!("resample mode: HWND={hwnd:#X}, output={width}x{height}");
-            (size, None)
-        }
-        CaptureMode::Crop(crop) => {
-            let output = crop.output_size();
-            log::info!(
-                "crop mode: HWND={hwnd:#X}, box=({},{})..({},{}), output={}x{}",
-                crop.min_x, crop.min_y, crop.max_x, crop.max_y,
-                output.width, output.height);
-            (output, Some(crop))
-        }
-        CaptureMode::Auto { .. } => anyhow::bail!("auto mode should use run_auto()"),
-        CaptureMode::Shared { .. } => anyhow::bail!("shared mode should use run_shared()"),
-    };
-
-    let staging_bgra8 =
-        d3d11::create_texture_2d(
-            &device,
-            frame_size,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_RENDER_TARGET])
-            .context("failed to create BGRA8 staging texture")?;
-    let staging_bgra8_rtv =
-        d3d11::create_rtv_for_texture_2d(&device, &staging_bgra8)
-            .context("failed to create BGRA8 staging RTV")?;
-
-    // Clear to the configured background so the first few frames aren't random garbage.
-    // SAFETY: `device_context` and `staging_bgra8_rtv` are valid D3D11 objects
-    // created from the same device.
-    unsafe {
-        device_context.ClearRenderTargetView(
-            &staging_bgra8_rtv,
-            &clear_color);
-    }
-
-    let deferred_context: ID3D11DeviceContext = {
-        let mut ctx = None;
-        // SAFETY: `device` is a valid D3D11 device; `ctx` is a stack-local out-param.
-        unsafe { device.CreateDeferredContext(0, Some(&raw mut ctx)) }
-            .context("failed to create deferred context")?;
-        ctx.ok_or_else(|| anyhow::anyhow!("deferred context is null"))?
-    };
-
-    let resampler = if crop_box.is_none() {
-        Some(Resampler::new(&device).context("failed to create resampler")?)
-    } else {
-        None
-    };
-
-    let encoder_input = BgraTextureInput::new(
-        device.clone(),
-        device_context.clone(),
-        staging_bgra8.clone(),
-        frame_size)?;
-    let encoding_handle = spawn_stdout_encoder(encoder_input, VideoEncoderConfig {
-        frame_rate,
-        bitrate: DEFAULT_BITRATE,
-    })?;
-
-    log::info!("capture session started");
-
-    // ── Capture loop ────────────────────────────────────────────────────
-    loop {
-        if encoding_handle.is_finished() {
-            anyhow::bail!("encoding thread exited unexpectedly");
-        }
-
-        match capture.get_next_frame(&device_context) {
-            Ok(Some(frame)) => {
-                // SAFETY: `deferred_context` and `staging_bgra8_rtv` are valid
-                // D3D11 objects from the same device.
-                unsafe {
-                    deferred_context.ClearRenderTargetView(
-                        &staging_bgra8_rtv,
-                        &clear_color);
-                }
-
-                if let Some(crop) = crop_box {
-                    let d3d_box = crop.to_d3d11_box(frame.size);
-                    // SAFETY: valid D3D11 objects from the same device.
-                    unsafe {
-                        deferred_context.CopySubresourceRegion(
-                            &staging_bgra8,
-                            0,
-                            0, 0, 0,
-                            &frame.raw_texture,
-                            0,
-                            Some(&raw const d3d_box));
-                    }
-                } else {
-                    let viewport =
-                        capture::calculate_resample_viewport(frame.size, frame_size);
-                    // SAFETY: `deferred_context` is valid.
-                    unsafe { deferred_context.RSSetViewports(Some(&[viewport])); }
-
-                    let source_srv =
-                        d3d11::create_srv_for_texture_2d(&device, &frame.raw_texture)
-                            .context("failed to create SRV for captured frame")?;
-                    resampler.as_ref().unwrap()
-                        .resample(&deferred_context, &source_srv, &staging_bgra8_rtv);
-
-                    // SAFETY: `deferred_context` is valid.
-                    unsafe { deferred_context.RSSetViewports(Some(&[])); }
-                }
-
-                let command_list = {
-                    let mut list = None;
-                    // SAFETY: `deferred_context` has recorded valid GPU commands.
-                    unsafe { deferred_context.FinishCommandList(false, Some(&raw mut list)) }
-                        .context("FinishCommandList failed")?;
-                    list.ok_or_else(|| anyhow::anyhow!("command list is null"))?
-                };
-                // SAFETY: valid immediate context + command list.
-                unsafe {
-                    device_context.ExecuteCommandList(&command_list, true);
-                }
-                // SAFETY: valid immediate context.
-                unsafe {
-                    device_context.Flush();
-                }
-                thread::sleep(Duration::from_millis(5));
-            },
-            Ok(None) => {
-                thread::sleep(Duration::from_millis(1));
-            },
-            Err(e) => {
-                log::error!("capture error: {e:?}");
-                thread::sleep(Duration::from_millis(100));
-            },
-        }
-    }
+            let level = buffer.default_styled_level(record.level());
+            let mut tag_style = buffer.style();
+            tag_style.set_color(Color::Cyan).set_bold(true);
+            let mut target_style = buffer.style();
+            target_style.set_color(Color::Black).set_bold(true);
+            writeln!(
+                buffer,
+                " {level} {} {} > {}",
+                tag_style.value(&tag),
+                target_style.value(record.target()),
+                record.args())
+        })
+        .init();
 }
 
-// ── Auto mode (hot-swap capture loop) ────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Run in auto mode: the selector thread polls the foreground window and sends
-/// swap commands.  The capture loop replaces the `CaptureSession` on each swap
-/// while the encoder keeps running on the same staging texture.
-fn run_auto(
-    width: u32,
-    height: u32,
-    frame_rate: u32,
-    clear_color: [f32; 4],
-    config_url: String,
-    info_url: String,
-) -> anyhow::Result<()> {
-    // SAFETY: Called once at the start of the main thread before any COM usage.
-    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-        .ok()
-        .context("CoInitializeEx failed")?;
-
-    let frame_size = Size2D::new(width, height);
-    log::info!("auto mode: output={width}x{height}");
-
-    let (_, device, device_context) =
-        d3d11::create_device()
-            .context("failed to create D3D11 device")?;
-
-    // Staging texture and RTV — shared between capture and encoding threads.
-    // Fixed size: the encoder never needs reconfiguration on window switch.
-    let staging_bgra8 =
-        d3d11::create_texture_2d(
-            &device, frame_size, DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_RENDER_TARGET])
-            .context("failed to create BGRA8 staging texture")?;
-    let staging_bgra8_rtv =
-        d3d11::create_rtv_for_texture_2d(&device, &staging_bgra8)
-            .context("failed to create BGRA8 staging RTV")?;
-
-    // SAFETY: valid D3D11 objects.
-    unsafe {
-        device_context.ClearRenderTargetView(
-            &staging_bgra8_rtv, &clear_color);
-    }
-
-    let deferred_context: ID3D11DeviceContext = {
-        let mut ctx = None;
-        // SAFETY: valid device.
-        unsafe { device.CreateDeferredContext(0, Some(&raw mut ctx)) }
-            .context("failed to create deferred context")?;
-        ctx.ok_or_else(|| anyhow::anyhow!("deferred context is null"))?
-    };
-
-    let resampler = Resampler::new(&device)
-        .context("failed to create resampler")?;
-
-    // Keep the transitional auto mode on the same texture-to-video boundary as
-    // base and crop modes so Phase 3 only needs to replace the input producer.
-    let encoder_input = BgraTextureInput::new(
-        device.clone(),
-        device_context.clone(),
-        staging_bgra8,
-        frame_size)?;
-    let encoding_handle = spawn_stdout_encoder(encoder_input, VideoEncoderConfig {
-        frame_rate,
-        bitrate: DEFAULT_BITRATE,
-    })?;
-
-    // Start the selector polling thread.
-    let swap_rx = selector::spawn_selector(selector::SelectorConfig {
-        config_url,
-        info_url,
-        poll_interval: Duration::from_secs(2),
-    });
-
-    log::info!("auto mode: waiting for first selector match...");
-
-    // ── Hot-swap capture loop ───────────────────────────────────────
-    // No capture session initially — we wait for the selector to pick a window.
-    let mut capture: Option<CaptureSession> = None;
-
-    loop {
-        if encoding_handle.is_finished() {
-            anyhow::bail!("encoding thread exited unexpectedly");
-        }
-
-        // Check for a swap command from the selector.
-        if let Ok(cmd) = swap_rx.try_recv() {
-            let hwnd_handle = HWND(cmd.hwnd as _);
-
-            // Drop the old session before creating a new one.
-            drop(capture.take());
-
-            match CaptureSession::from_hwnd(&device, hwnd_handle) {
-                Ok(new_session) => {
-                    capture = Some(new_session);
-                    log::info!("hot-swap: now capturing HWND 0x{:X} ({})",
-                        cmd.hwnd, cmd.capture_info);
-                }
-                Err(e) => {
-                    log::error!("hot-swap: failed to create capture session: {e}");
-                    // Continue without a session — selector will retry.
-                }
-            }
-        }
-
-        // If no active session, sleep and check again.
-        let Some(ref mut cap) = capture else {
-            thread::sleep(Duration::from_millis(50));
-            continue;
-        };
-
-        // Capture + resample into staging texture (same as base mode resample path).
-        match cap.get_next_frame(&device_context) {
-            Ok(Some(frame)) => {
-                // SAFETY: valid D3D11 objects.
-                unsafe {
-                    deferred_context.ClearRenderTargetView(
-                        &staging_bgra8_rtv, &clear_color);
-                }
-
-                let viewport =
-                    capture::calculate_resample_viewport(frame.size, frame_size);
-                // SAFETY: valid deferred context.
-                unsafe { deferred_context.RSSetViewports(Some(&[viewport])); }
-
-                let source_srv =
-                    d3d11::create_srv_for_texture_2d(&device, &frame.raw_texture)
-                        .context("failed to create SRV for captured frame")?;
-                resampler.resample(&deferred_context, &source_srv, &staging_bgra8_rtv);
-
-                // SAFETY: valid deferred context.
-                unsafe { deferred_context.RSSetViewports(Some(&[])); }
-
-                let command_list = {
-                    let mut list = None;
-                    // SAFETY: valid deferred context with recorded commands.
-                    unsafe { deferred_context.FinishCommandList(false, Some(&raw mut list)) }
-                        .context("FinishCommandList failed")?;
-                    list.ok_or_else(|| anyhow::anyhow!("command list is null"))?
-                };
-                // SAFETY: valid immediate context + command list.
-                unsafe { device_context.ExecuteCommandList(&command_list, true); }
-                // SAFETY: valid immediate context.
-                unsafe { device_context.Flush(); }
-                thread::sleep(Duration::from_millis(5));
-            }
-            Ok(None) => {
-                thread::sleep(Duration::from_millis(1));
-            }
-            Err(e) => {
-                log::error!("capture error: {e:?}");
-                // Capture session might be stale (window closed). Drop it and
-                // let the selector pick a new one.
-                capture = None;
-                thread::sleep(Duration::from_millis(100));
-            }
-        }
+    #[test]
+    fn dimensions_must_match_encoder_alignment() {
+        validate_dimensions(1920, 1200).unwrap();
+        assert!(validate_dimensions(1919, 1200).is_err());
+        assert!(validate_dimensions(1920, 1199).is_err());
     }
 }

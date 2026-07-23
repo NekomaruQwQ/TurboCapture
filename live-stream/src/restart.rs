@@ -16,8 +16,8 @@ const MAX_CONSECUTIVE_RESTARTS: u32 = 6;
 /// Managed child whose process exit triggered recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Component {
-    /// Safe foreground selector and shared-texture producer.
-    Selector,
+    /// Safe window capture and shared-texture producer.
+    Capture,
     /// Shared-texture consumer and H.264 producer.
     Encoder,
     /// Stdin-to-WebSocket transport worker.
@@ -28,7 +28,7 @@ impl Component {
     /// Stable diagnostic label used in generation-aware supervisor logs.
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Selector => "live-selector",
+            Self::Capture => "live-capture",
             Self::Encoder => "live-encoder",
             Self::Relay => "live-ws",
         }
@@ -39,8 +39,8 @@ impl Component {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryScope {
     /// Retain the mailbox, encoder, and relay while restarting capture.
-    Selector,
-    /// Retain the mailbox and selector while recreating the media pipe pair.
+    Capture,
+    /// Retain the mailbox and capture worker while recreating the media pipe pair.
     EncoderRelay,
     /// Re-select the adapter and replace the complete GPU resource cohort.
     ResourceGeneration,
@@ -52,7 +52,7 @@ pub const fn recovery_scope(component: Component, exit_code: Option<i32>) -> Rec
         return RecoveryScope::ResourceGeneration;
     }
     match component {
-        Component::Selector => RecoveryScope::Selector,
+        Component::Capture => RecoveryScope::Capture,
         Component::Encoder | Component::Relay => RecoveryScope::EncoderRelay,
     }
 }
@@ -96,12 +96,12 @@ mod tests {
     #[test]
     fn resource_loss_overrides_component_local_recovery() {
         assert_eq!(
-            recovery_scope(Component::Selector, Some(RESOURCE_GENERATION_LOST_EXIT_CODE)),
+            recovery_scope(Component::Capture, Some(RESOURCE_GENERATION_LOST_EXIT_CODE)),
             RecoveryScope::ResourceGeneration);
         assert_eq!(
             recovery_scope(Component::Encoder, Some(RESOURCE_GENERATION_LOST_EXIT_CODE)),
             RecoveryScope::ResourceGeneration);
-        assert_eq!(recovery_scope(Component::Selector, Some(1)), RecoveryScope::Selector);
+        assert_eq!(recovery_scope(Component::Capture, Some(1)), RecoveryScope::Capture);
         assert_eq!(recovery_scope(Component::Relay, Some(0)), RecoveryScope::EncoderRelay);
     }
 

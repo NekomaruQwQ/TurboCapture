@@ -6,7 +6,7 @@ members = [
     "live-encoder",
     "live-kpm",
     "live-protocol",
-    "live-selector",
+    "live-capture",
     "live-server",
     "live-stream",
     "live-ws",
@@ -20,7 +20,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies.nkcore]
-path = "D:/1-Code/Core/Nekomaru-Rust/nkcore"
+path = "D:/1-Code/Core/Nekomaru-Rust/nkcore-windows"
+package = "nkcore-windows"
 
 [workspace.dependencies.winrt-capture]
 path = "D:/1-Code/Core/Nekomaru-Rust/winrt-capture"

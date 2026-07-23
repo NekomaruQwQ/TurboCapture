@@ -12,18 +12,10 @@ live-shared-texture = { path = "../crates/live-shared-texture" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
-enumerate-windows = { workspace = true }
-set-dpi-awareness = { workspace = true }
 pretty_env_logger = { workspace = true }
-serde = { workspace = true }
 log = { workspace = true }
 nkcore = { workspace = true, features = ["debug"] }
-pretty-name = { workspace = true }
-serde_json = { workspace = true }
 widestring = { workspace = true }
-ureq = { workspace = true }
-winrt-capture = { workspace = true }
-win32-version-info = { workspace = true }
 
 windows = { workspace = true, features = [
     "Win32_Foundation",

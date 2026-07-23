@@ -1,4 +1,4 @@
-//! Non-blocking publication of selector frames into a managed shared texture.
+//! Non-blocking publication of captured frames into a managed shared texture.
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 
 use crate::{
-    capture::calculate_resample_viewport,
+    capture::{CropBox, calculate_resample_viewport},
     d3d11,
     resample::Resampler,
 };
@@ -28,7 +28,16 @@ use crate::{
 /// Interval for aggregated publication-rate and miss diagnostics.
 const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Optional managed output attached to the standalone selector renderer.
+/// GPU operation that maps one captured frame into the fixed mailbox.
+#[derive(Debug, Clone, Copy)]
+pub enum FrameTransform {
+    /// Aspect-preserving scale with clear-color letterboxing.
+    Resample,
+    /// Native-pixel subrectangle with right/bottom encoder padding.
+    Crop(CropBox),
+}
+
+/// Optional managed output attached to the standalone capture renderer.
 pub struct SharedPublisher {
     /// Open shared mailbox, including its two-key mutex.
     mailbox: OpenedMailbox,
@@ -74,7 +83,7 @@ impl SharedPublisher {
         Ok(publisher)
     }
 
-    /// Publish one resampled frame without ever waiting for the encoder.
+    /// Publish one transformed frame without ever waiting for the encoder.
     ///
     /// A busy consumer causes this frame to be dropped and counted. An
     /// abandoned mutex is fatal because partially submitted GPU work makes the
@@ -84,7 +93,8 @@ impl SharedPublisher {
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         source_texture: &ID3D11Texture2D,
-        source_size: Size2D<u32>) -> anyhow::Result<()> {
+        source_size: Size2D<u32>,
+        transform: FrameTransform) -> anyhow::Result<()> {
         let started = Instant::now();
         match self.mailbox.mutex.acquire(PRODUCER_KEY, 0)? {
             AcquireStatus::Timeout => {
@@ -109,17 +119,41 @@ impl SharedPublisher {
             anyhow::ensure!(
                 source_size.width > 0 && source_size.height > 0,
                 "captured frame dimensions must be non-zero");
-            let source_view = d3d11::create_srv_for_texture_2d(device, source_texture)
-                .context("failed to create managed-output source view")?;
-            let viewport = calculate_resample_viewport(source_size, self.mailbox.size);
             // SAFETY: The render target and context share the selected device.
             unsafe { context.ClearRenderTargetView(&self.render_target, &self.clear_color); }
-            // SAFETY: The viewport fits the fixed-size shared texture.
-            unsafe { context.RSSetViewports(Some(&[viewport])); }
-            self.resampler.resample(context, &source_view, &self.render_target);
-            // SAFETY: Empty viewports and `Flush` submit and clear the shared
-            // texture work before ownership transfers to the consumer.
-            unsafe { context.RSSetViewports(Some(&[])); }
+            match transform {
+                FrameTransform::Resample => {
+                    let source_view = d3d11::create_srv_for_texture_2d(device, source_texture)
+                        .context("failed to create managed-output source view")?;
+                    let viewport = calculate_resample_viewport(source_size, self.mailbox.size);
+                    // SAFETY: The viewport fits the fixed-size shared texture.
+                    unsafe { context.RSSetViewports(Some(&[viewport])); }
+                    self.resampler.resample(context, &source_view, &self.render_target);
+                    // SAFETY: Clearing the viewport avoids leaking capture
+                    // state into later D3D work on this immediate context.
+                    unsafe { context.RSSetViewports(Some(&[])); }
+                }
+                FrameTransform::Crop(crop) => {
+                    if let Some(source_box) = crop.clamped_d3d11_box(source_size) {
+                        // SAFETY: Both textures use the selected device. The
+                        // source box is clamped to the live WGC frame and fits
+                        // within the crop-sized, padded mailbox.
+                        unsafe {
+                            context.CopySubresourceRegion(
+                                &self.mailbox.texture,
+                                0,
+                                0,
+                                0,
+                                0,
+                                source_texture,
+                                0,
+                                Some(&raw const source_box));
+                        }
+                    }
+                }
+            }
+            // SAFETY: `Flush` submits the complete clear/draw or clear/copy
+            // before ownership transfers to the consumer.
             // SAFETY: `context` is live and flushing has no pointer preconditions.
             unsafe { context.Flush(); }
             Ok::<(), anyhow::Error>(())

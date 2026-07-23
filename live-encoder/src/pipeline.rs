@@ -1,10 +1,8 @@
 //! Texture-to-video pipeline owned by `live-encoder`.
 //!
-//! This module is the boundary between a BGRA frame producer and the encoded
-//! stdout stream. The transitional CLI still produces its input texture from
-//! Windows Graphics Capture in-process; Phase 3 can replace that producer with
-//! a private copy of a supervisor-owned shared texture without changing NV12
-//! conversion, NVENC configuration, AVCC serialization, or wire framing.
+//! This module is the boundary between a shared BGRA frame producer and the
+//! encoded stdout stream. It copies each publication into an encoder-private
+//! texture before conversion so keyed-mutex ownership never includes NVENC work.
 
 use crate::{
     NALUnit,
@@ -46,56 +44,21 @@ const FIRST_FRAME_TIMEOUT_MS: u32 = 10_000;
 
 /// Validated fixed-size BGRA texture consumed by the encoding pipeline.
 ///
-/// The D3D11 objects are owned here so the texture and its device remain alive
-/// for the entire worker lifetime. Phase 3 will construct this input only after
-/// copying a shared publication texture into an encoder-private texture.
+/// The D3D11 objects are owned here so the mailbox, private texture, and device
+/// remain alive for the entire worker lifetime.
 pub struct BgraTextureInput {
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
-    source: BgraTextureSource,
+    source: SharedBgraInput,
     frame_size: Size2D<u32>,
 }
 
-/// Direct transitional input or cross-process latest-frame mailbox.
-enum BgraTextureSource {
-    /// Legacy capture and encoding threads share one in-process texture.
-    Direct(ID3D11Texture2D),
-    /// Managed mode copies the shared publication into a private texture.
-    Shared(SharedBgraInput),
-}
-
 impl BgraTextureInput {
-    /// Validate and retain a fixed-size BGRA encoder input.
-    ///
-    /// Returns an error when the descriptor would require an implicit format,
-    /// dimension, mip, array, or multisample conversion. Device compatibility
-    /// is enforced by D3D11 when the converter creates its input view.
-    pub fn new(
-        device: ID3D11Device,
-        device_context: ID3D11DeviceContext,
-        texture: ID3D11Texture2D,
-        expected_size: Size2D<u32>)
-        -> anyhow::Result<Self> {
-        let mut descriptor = D3D11_TEXTURE2D_DESC::default();
-        // SAFETY: `texture` is a live COM object and `descriptor` is a valid
-        // stack-local out parameter for the infallible D3D11 `GetDesc` call.
-        unsafe { texture.GetDesc(&raw mut descriptor); }
-        validate_bgra_texture_descriptor(&descriptor, expected_size)?;
-
-        Ok(Self {
-            device,
-            device_context,
-            source: BgraTextureSource::Direct(texture),
-            frame_size: expected_size,
-        })
-    }
-
     /// Open a supervisor-owned mailbox and allocate the encoder-private copy.
     ///
     /// The inherited handle closes after `OpenSharedResource1`; the opened
     /// texture and keyed mutex retain independent COM references. The private
-    /// texture uses the same validated fixed-size BGRA contract as transitional
-    /// direct input.
+    /// texture uses the same validated fixed-size BGRA contract as the mailbox.
     pub fn from_shared(
         device: ID3D11Device,
         device_context: ID3D11DeviceContext,
@@ -117,23 +80,19 @@ impl BgraTextureInput {
         Ok(Self {
             device,
             device_context,
-            source: BgraTextureSource::Shared(SharedBgraInput {
+            source: SharedBgraInput {
                 mailbox,
                 private_texture,
                 has_frame: false,
                 metrics: CopyMetrics::new(),
-            }),
+            },
             frame_size: expected_size,
         })
     }
 
     /// Return the next private BGRA texture for conversion.
     fn next_texture(&mut self) -> anyhow::Result<ID3D11Texture2D> {
-        match &mut self.source {
-            &mut BgraTextureSource::Direct(ref texture) => Ok(texture.clone()),
-            &mut BgraTextureSource::Shared(ref mut source) =>
-                source.copy_latest(&self.device_context),
-        }
+        self.source.copy_latest(&self.device_context)
     }
 }
 
@@ -283,9 +242,9 @@ pub struct VideoEncoderConfig {
 /// Spawn the texture-to-stdout encoder worker.
 ///
 /// The worker initializes COM and Media Foundation on its own thread. Startup
-/// and runtime failures finish the returned handle, allowing the transitional
-/// capture loop—and later `live-stream`—to treat encoder exit as a component
-/// failure. A closed stdout pipe retains the legacy clean-process-exit behavior.
+/// and runtime failures finish the returned handle, allowing `live-stream` to
+/// treat encoder exit as a component failure. A closed stdout pipe exits the
+/// worker cleanly because the transport reader has gone away.
 pub fn spawn_stdout_encoder(
     input: BgraTextureInput,
     config: VideoEncoderConfig)

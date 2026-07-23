@@ -8,10 +8,8 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true }
 euclid = { workspace = true }
 log = { workspace = true }
-pretty_env_logger = { workspace = true }
 
 windows = { workspace = true, features = [
     "Win32_Foundation",

@@ -1,8 +1,9 @@
-//! `live-selector.exe` — local fixed-size preview of the auto-selector output.
+//! `live-capture.exe` — safe standalone or managed GPU window capture.
 //!
-//! Uses the same foreground matching and Windows Graphics Capture path as
-//! the legacy `live-encoder --mode auto`, but presents frames directly through D3D11
-//! instead of converting to NV12 or encoding an H.264 stream.
+//! A local profile TOML selects allowed foreground windows for the primary
+//! public mode. The stream supervisor may instead provide one already-resolved
+//! HWND and crop rectangle for a policy it owns. Neither mode encodes or uses
+//! network transport.
 
 mod capture;
 mod d3d11;
@@ -20,12 +21,12 @@ use std::{
 use anyhow::Context as _;
 use clap::Parser;
 use crate::{
-    capture::CaptureSession,
+    capture::{CaptureSession, CropBox},
     selector::{SelectorCommand, SelectorConfig, spawn_selector},
 };
 use nkcore::{
-    os::windows::winit::{AppEvent, EventLoopExt as _},
     prelude::euclid::Size2D,
+    winit::{AppEvent, EventLoopExt as _},
 };
 use live_shared_texture::{
     AdapterLuid,
@@ -35,7 +36,7 @@ use live_shared_texture::{
     is_resource_generation_lost,
 };
 use presenter::Presenter;
-use publisher::SharedPublisher;
+use publisher::{FrameTransform, SharedPublisher};
 use windows::Win32::{
     Foundation::HWND,
     System::Com::{COINIT_MULTITHREADED, CoInitializeEx},
@@ -55,7 +56,7 @@ const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1200;
 /// Background used for letterboxing and periods without an active target.
 const CLEAR_COLOR: [f32; 4] = [41.0 / 255.0, 41.0 / 255.0, 41.0 / 255.0, 1.0];
-/// Normal selector polling cadence, matching legacy `live-encoder --mode auto`.
+/// Normal selector polling cadence.
 const SELECTOR_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Capture retry delay after a window closes or WGC reports an error.
 const CAPTURE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -64,13 +65,33 @@ const ACTIVE_WAKE_INTERVAL: Duration = Duration::from_millis(1);
 /// Reduced wake cadence while no target is available or the preview is hidden.
 const IDLE_WAKE_INTERVAL: Duration = Duration::from_millis(50);
 
-/// CLI arguments for the local selector preview.
+/// CLI arguments for standalone safe sharing and managed publication.
 #[derive(Parser)]
-#[command(name = "live-selector", about = "Preview allowlisted windows in a fixed-size window")]
+#[command(name = "live-capture", about = "Capture allowlisted windows into fixed-size GPU output")]
 struct Args {
     /// Local selector profile TOML to load and monitor.
-    #[arg(long)]
-    config: PathBuf,
+    #[arg(long, conflicts_with = "hwnd")]
+    config: Option<PathBuf>,
+
+    /// Resolved window handle for supervisor-owned generic crop capture.
+    #[arg(long, value_parser = parse_hwnd, conflicts_with = "config")]
+    hwnd: Option<isize>,
+
+    /// Inclusive crop left edge in captured-texture pixels.
+    #[arg(long, requires_all = ["hwnd", "crop_min_y", "crop_max_x", "crop_max_y"])]
+    crop_min_x: Option<u32>,
+
+    /// Inclusive crop top edge in captured-texture pixels.
+    #[arg(long, requires_all = ["hwnd", "crop_min_x", "crop_max_x", "crop_max_y"])]
+    crop_min_y: Option<u32>,
+
+    /// Exclusive crop right edge in captured-texture pixels.
+    #[arg(long, requires_all = ["hwnd", "crop_min_x", "crop_min_y", "crop_max_y"])]
+    crop_max_x: Option<u32>,
+
+    /// Exclusive crop bottom edge in captured-texture pixels.
+    #[arg(long, requires_all = ["hwnd", "crop_min_x", "crop_min_y", "crop_max_x"])]
+    crop_max_y: Option<u32>,
 
     /// Fixed physical width of the preview client area.
     #[arg(long, default_value_t = DEFAULT_WIDTH, value_parser = clap::value_parser!(u32).range(1..))]
@@ -81,8 +102,12 @@ struct Args {
     height: u32,
 
     /// Preview window title.
-    #[arg(long, default_value = "Live Selector")]
+    #[arg(long, default_value = "Live Capture")]
     title: String,
+
+    /// Keep the capture path headless; valid only with managed shared output.
+    #[arg(long, requires = "shared_handle")]
+    no_preview: bool,
 
     /// Supervisor-owned NT shared-texture handle inherited by this process.
     #[arg(long, requires = "adapter_luid")]
@@ -97,6 +122,59 @@ struct Args {
     fault_abandon_after_publications: Option<u64>,
 }
 
+/// Validated capture-source policy chosen before any GPU resource is created.
+enum CaptureSource {
+    /// Local allowlist with live atomic reload.
+    Profiles(PathBuf),
+    /// Supervisor-resolved generic crop with no special-stream knowledge.
+    Crop { hwnd: isize, crop: CropBox },
+}
+
+/// Parse decimal or `0x`-prefixed Win32 window handles without accepting null.
+fn parse_hwnd(value: &str) -> Result<isize, String> {
+    let parsed = value
+        .strip_prefix("0x")
+        .map_or_else(|| value.parse(), |hex| isize::from_str_radix(hex, 16))
+        .map_err(|error| format!("invalid HWND {value:?}: {error}"))?;
+    if parsed == 0 {
+        Err("HWND must be non-zero".to_owned())
+    } else {
+        Ok(parsed)
+    }
+}
+
+/// Reject partial or ambiguous source specifications before starting capture.
+fn resolve_source(args: &Args) -> anyhow::Result<CaptureSource> {
+    match (
+        args.config.as_ref(),
+        args.hwnd,
+        args.crop_min_x,
+        args.crop_min_y,
+        args.crop_max_x,
+        args.crop_max_y,
+    ) {
+        (Some(config), None, None, None, None, None) =>
+            Ok(CaptureSource::Profiles(config.clone())),
+        (None, Some(hwnd), Some(min_x), Some(min_y), Some(max_x), Some(max_y)) => {
+            anyhow::ensure!(args.shared_handle.is_some(), "crop capture requires managed shared output");
+            anyhow::ensure!(args.no_preview, "crop capture requires --no-preview");
+            anyhow::ensure!(max_x > min_x, "--crop-max-x must be greater than --crop-min-x");
+            anyhow::ensure!(max_y > min_y, "--crop-max-y must be greater than --crop-min-y");
+            let crop = CropBox { min_x, min_y, max_x, max_y };
+            anyhow::ensure!(
+                crop.output_size() == Size2D::new(args.width, args.height),
+                "crop output is {}x{}, but --width/--height specify {}x{}",
+                crop.output_size().width,
+                crop.output_size().height,
+                args.width,
+                args.height);
+            Ok(CaptureSource::Crop { hwnd, crop })
+        }
+        _ => anyhow::bail!(
+            "provide either --config or the complete --hwnd + --crop-min-x/y + --crop-max-x/y source"),
+    }
+}
+
 /// Last selector target, retained so a failed WGC session can be recreated
 /// without waiting for the foreground window to change.
 struct SelectedTarget {
@@ -104,6 +182,8 @@ struct SelectedTarget {
     hwnd: isize,
     /// Human-readable executable description used in lifecycle logs.
     capture_info: String,
+    /// Fixed-output operation applied before presentation to the encoder.
+    transform: FrameTransform,
 }
 
 fn main() {
@@ -123,6 +203,7 @@ fn main() {
 /// Winit's resume callback cannot return a `Result`, so window, HWND, or D3D
 /// initialization failures inside that callback panic with contextual messages.
 fn run(args: Args) -> anyhow::Result<()> {
+    let source = resolve_source(&args)?;
     set_dpi_awareness::per_monitor_v2().context("failed to enable per-monitor DPI awareness")?;
 
     // SAFETY: This runs once on the main thread before winit, WGC, or any
@@ -143,6 +224,7 @@ fn run(args: Args) -> anyhow::Result<()> {
                         .with_title(args.title)
                         .with_inner_size(physical_size)
                         .with_resizable(false)
+                        .with_visible(!args.no_preview)
                         // Winit's drag/drop path calls `OleInitialize` for STA,
                         // which conflicts with the MTA required by WGC on this
                         // thread. The preview has no file-drop behavior.
@@ -172,27 +254,45 @@ fn run(args: Args) -> anyhow::Result<()> {
                     .map_err(|error| ResourceGenerationLost::new(format!(
                         "failed to initialize managed shared output: {error:#}")))
                     .unwrap_or_else(|error| exit_worker(error.into(), true)));
-            let swap_rx = spawn_selector(SelectorConfig {
-                config_path: args.config,
-                ignored_hwnd: preview_hwnd.0 as isize,
-                poll_interval: SELECTOR_POLL_INTERVAL,
-            });
+            let (swap_rx, selected, fixed_source) = match source {
+                CaptureSource::Profiles(config_path) => (
+                    Some(spawn_selector(SelectorConfig {
+                        config_path,
+                        ignored_hwnd: preview_hwnd.0 as isize,
+                        poll_interval: SELECTOR_POLL_INTERVAL,
+                    })),
+                    None,
+                    false,
+                ),
+                CaptureSource::Crop { hwnd, crop } => (
+                    None,
+                    Some(SelectedTarget {
+                        hwnd,
+                        capture_info: format!("managed HWND 0x{hwnd:X}"),
+                        transform: FrameTransform::Crop(crop),
+                    }),
+                    true,
+                ),
+            };
 
             log::info!(
-                "selector preview started: {}x{}, HWND=0x{:X}",
+                "capture started: {}x{}, preview={}, HWND=0x{:X}",
                 output_size.width,
                 output_size.height,
+                !args.no_preview,
                 preview_hwnd.0 as isize);
 
             let mut state = PreviewState {
                 presenter,
                 publisher,
                 swap_rx,
-                selected: None,
+                selected,
                 capture: None,
                 retry_at: Instant::now(),
                 occluded: false,
                 managed: args.shared_handle.is_some(),
+                fixed_source,
+                preview_enabled: !args.no_preview,
                 window,
             };
 
@@ -205,13 +305,18 @@ fn run(args: Args) -> anyhow::Result<()> {
 ///
 /// Field order intentionally keeps the HWND-owning window alive until after
 /// the presenter and capture session have been dropped.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent window, output, source, and recovery state are clearer as named flags")]
 struct PreviewState {
     /// GPU presentation state, declared before `window` so it drops first.
     presenter: Presenter,
     /// Optional non-blocking managed output using the presenter's adapter.
     publisher: Option<SharedPublisher>,
     /// Selector updates consumed without blocking the window event loop.
-    swap_rx: mpsc::Receiver<SelectorCommand>,
+    ///
+    /// A supervisor-resolved fixed crop has no selector thread.
+    swap_rx: Option<mpsc::Receiver<SelectorCommand>>,
     /// Latest selected target retained across capture-session failures.
     selected: Option<SelectedTarget>,
     /// Active WGC session, recreated independently of selector polling.
@@ -222,6 +327,10 @@ struct PreviewState {
     occluded: bool,
     /// Whether device/mailbox loss must request complete generation recovery.
     managed: bool,
+    /// Whether a stale WGC session should return control to window discovery.
+    fixed_source: bool,
+    /// Whether frames should also be presented to the local swap chain.
+    preview_enabled: bool,
     /// HWND owner, deliberately declared last so every dependent field drops first.
     window: Window,
 }
@@ -264,7 +373,8 @@ impl PreviewState {
     fn tick(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         self.apply_latest_selection();
 
-        let delay = if self.occluded {
+        let has_active_output = !self.occluded || self.publisher.is_some();
+        let delay = if !has_active_output {
             IDLE_WAKE_INTERVAL
         } else {
             self.ensure_capture();
@@ -282,19 +392,24 @@ impl PreviewState {
     /// Apply only the newest queued selection because intermediate targets can
     /// no longer be foreground by the time the event loop observes them.
     fn apply_latest_selection(&mut self) {
+        let Some(swap_rx) = self.swap_rx.as_ref() else { return };
         let mut latest = None;
-        while let Ok(command) = self.swap_rx.try_recv() {
+        while let Ok(command) = swap_rx.try_recv() {
             latest = Some(command);
         }
         let Some(command) = latest else { return };
 
         match command {
             SelectorCommand::Select { hwnd, capture_info } => {
-                log::info!("switching preview to HWND 0x{hwnd:X} ({capture_info})");
-                self.selected = Some(SelectedTarget { hwnd, capture_info });
+                log::info!("switching capture to HWND 0x{hwnd:X} ({capture_info})");
+                self.selected = Some(SelectedTarget {
+                    hwnd,
+                    capture_info,
+                    transform: FrameTransform::Resample,
+                });
             }
             SelectorCommand::Clear => {
-                log::info!("clearing selector preview");
+                log::info!("clearing capture output");
                 self.selected = None;
             }
         }
@@ -323,6 +438,11 @@ impl PreviewState {
                 self.capture = Some(capture);
             }
             Err(error) => {
+                if self.fixed_source {
+                    exit_worker(
+                        error.context("fixed capture target is unavailable"),
+                        self.managed);
+                }
                 log::warn!("failed to open HWND 0x{:X}: {error:#}", target.hwnd);
                 self.retry_at = Instant::now() + CAPTURE_RETRY_INTERVAL;
             }
@@ -335,9 +455,11 @@ impl PreviewState {
 
         match capture.get_next_frame(self.presenter.device_context()) {
             Ok(Some(frame)) => {
-                if let Err(error) = self.presenter.render(&frame.raw_texture, frame.size) {
+                if self.preview_enabled
+                    && !self.occluded
+                    && let Err(error) = self.presenter.render(&frame.raw_texture, frame.size) {
                     exit_worker(
-                        error.context("failed to render selector preview"),
+                        error.context("failed to render capture preview"),
                         self.managed);
                 }
                 if let Some(publisher) = self.publisher.as_mut()
@@ -345,14 +467,23 @@ impl PreviewState {
                         self.presenter.device(),
                         self.presenter.device_context(),
                         &frame.raw_texture,
-                        frame.size) {
+                        frame.size,
+                        self.selected
+                            .as_ref()
+                            .expect("an active capture has a selected target")
+                            .transform) {
                     exit_worker(
-                        error.context("failed to publish selector frame"),
+                        error.context("failed to publish captured frame"),
                         true);
                 }
             }
             Ok(None) => {}
             Err(error) => {
+                if self.fixed_source {
+                    exit_worker(
+                        error.context("fixed capture session failed"),
+                        self.managed);
+                }
                 log::warn!("capture session failed; retrying: {error:#}");
                 self.capture = None;
                 self.retry_at = Instant::now() + CAPTURE_RETRY_INTERVAL;
@@ -386,5 +517,56 @@ fn hwnd_from_window(window: &Window) -> anyhow::Result<HWND> {
         RawWindowHandle::Win32(handle) =>
             Ok(HWND(handle.hwnd.get() as *mut core::ffi::c_void)),
         other => anyhow::bail!("expected a Win32 window handle, got {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_source_is_the_primary_public_interface() {
+        let args = Args::try_parse_from([
+            "live-capture",
+            "--config",
+            "profiles.toml",
+        ]).unwrap();
+        let CaptureSource::Profiles(path) = resolve_source(&args).unwrap() else {
+            panic!("expected profile source");
+        };
+        assert_eq!(path, PathBuf::from("profiles.toml"));
+        assert_eq!((args.width, args.height), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
+    }
+
+    #[test]
+    fn managed_crop_requires_exact_padded_output_dimensions() {
+        let args = Args::try_parse_from([
+            "live-capture",
+            "--hwnd", "0x1234",
+            "--crop-min-x", "2",
+            "--crop-min-y", "682",
+            "--crop-max-x", "1262",
+            "--crop-max-y", "750",
+            "--width", "1264",
+            "--height", "80",
+            "--no-preview",
+            "--shared-handle", "123",
+            "--adapter-luid", "1",
+        ]).unwrap();
+        let CaptureSource::Crop { hwnd, crop } = resolve_source(&args).unwrap() else {
+            panic!("expected crop source");
+        };
+        assert_eq!(hwnd, 0x1234);
+        assert_eq!(crop.output_size(), Size2D::new(1264, 80));
+    }
+
+    #[test]
+    fn incomplete_crop_source_is_rejected() {
+        let error = Args::try_parse_from([
+            "live-capture",
+            "--hwnd", "123",
+            "--crop-min-x", "2",
+        ]).err().expect("partial crop should fail CLI validation");
+        assert!(error.to_string().contains("--crop-min-y"));
     }
 }

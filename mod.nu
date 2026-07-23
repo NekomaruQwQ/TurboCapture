@@ -12,7 +12,8 @@
 #
 # Every binary invocation goes through `get-exe`, which runs `cargo build
 # --release --bin <name>` to ensure the binary is up-to-date.  Binaries that
-# may run concurrently across launchers (live-encoder, live-ws, live-app) use
+# may run concurrently across launchers (live-capture, live-encoder, live-ws,
+# live-app) use
 # `get-exe --copy <id>` to copy the exe before spawning — this prevents file
 # locking from blocking subsequent builds on Windows.
 
@@ -183,77 +184,33 @@ export def --wrapped run-youtube-music [...args]: nothing -> nothing {
         ...$args)
 }
 
-# ── Launcher for transitional live-encoder and live-kpm ──
+# ── Capture and telemetry launchers ──
 
-# Preview the local selector policy without encoding or network transport.
-export def --wrapped run-selector [--config: path, ...args]: nothing -> nothing {
+# Preview the local capture policy without encoding or network transport.
+export def --wrapped "run-capture preview" [--config: path, ...args]: nothing -> nothing {
     # Keep the ignored personal example as the convenient default while still
     # allowing an explicit profile file as the first positional argument.
     let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
-    (^(get-exe "live-selector" --copy "selector")
+    (^(get-exe "live-capture" --copy "preview")
         --config $config_path
         ...$args)
-}
-
-# Start the auto-selector capture pipeline.
-# Polls the foreground window, matches patterns from the server config,
-# hot-swaps the capture session, and relays encoded frames via WebSocket.
-export def "run-capture auto" []: nothing -> nothing {
-    # Ensure LIVE_HOST is set for URL parsing.
-    get-url | ignore
-
-    (^(get-exe "live-encoder" --copy "auto")
-        --mode auto
-        --width 1920 --height 1200
-        --stream-id main
-        --config-url (get-url "/api/selector/config")
-        --info-url   (get-url "/internal/streams/main/info")
-    |^(get-exe "live-ws" --copy "auto")
-        --mode video
-        --server     (get-url --ws "/internal/streams/main"))
-}
-
-# Exercise the Phase 3 supervisor-owned shared-texture path. The proof
-# executable owns the adapter and resource generation, while live-selector and
-# live-encoder remain independently built workers connected only by the
-# inherited texture handle. Its stdout stays protocol-framed and pipes directly
-# into live-ws like the transitional capture modes.
-export def --wrapped "run-capture shared" [--config: path, ...args]: nothing -> nothing {
-    # Resolve every interactive URL and build every child before constructing
-    # the media pipe so setup cannot strand a producer with no stdout reader.
-    get-url | ignore
-    let server_url = get-url --ws "/internal/streams/main"
-    let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
-    let selector_path = get-exe "live-selector" --copy "shared"
-    let encoder_path = get-exe "live-encoder" --copy "shared"
-    let proof_path = get-exe "live-texture-proof" --copy "shared"
-    let ws_path = get-exe "live-ws" --copy "shared"
-
-    ( ^$proof_path
-        --selector $selector_path
-        --encoder $encoder_path
-        --config $config_path
-        ...$args
-    | ^$ws_path
-        --mode video
-        --server $server_url)
 }
 
 # Start the supervised main stream from a local selector profile source.
 # live-stream owns the encoder-to-relay pipe, resource-generation recovery,
 # Job Object containment, and metadata posting. Selector policy remains a local
-# TOML carried with this invocation and interpreted only by live-selector.
+# TOML carried with this invocation and interpreted only by live-capture.
 export def --wrapped "run-capture main" [--config: path, ...args]: nothing -> nothing {
     get-url | ignore
     let config_path = $config | default ($REPO_ROOT | path join "data" "selector-new.toml")
-    let selector_path = get-exe "live-selector" --copy "main"
+    let capture_path = get-exe "live-capture" --copy "main"
     let encoder_path = get-exe "live-encoder" --copy "main"
     let relay_path = get-exe "live-ws" --copy "main"
     let supervisor_path = get-exe "live-stream" --copy "main"
 
     (^$supervisor_path
         --mode main
-        --selector $selector_path
+        --capture $capture_path
         --encoder $encoder_path
         --relay $relay_path
         --config $config_path
@@ -266,12 +223,14 @@ export def --wrapped "run-capture main" [--config: path, ...args]: nothing -> no
 # discovery, DPI-aware crop policy, the generic crop encoder, and relay restarts.
 export def --wrapped "run-capture youtube-music" [...args]: nothing -> nothing {
     get-url | ignore
+    let capture_path = get-exe "live-capture" --copy "youtube-music"
     let encoder_path = get-exe "live-encoder" --copy "youtube-music"
     let relay_path = get-exe "live-ws" --copy "youtube-music"
     let supervisor_path = get-exe "live-stream" --copy "youtube-music"
 
     (^$supervisor_path
         --mode youtube-music
+        --capture $capture_path
         --encoder $encoder_path
         --relay $relay_path
         --youtube-music-title $YOUTUBE_MUSIC_TITLE

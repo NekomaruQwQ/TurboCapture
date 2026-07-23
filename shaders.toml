@@ -1,19 +1,9 @@
 [[compile]]
-path = "live-encoder/src/resample.hlsl"
+path = "live-capture/src/resample.hlsl"
 entry = "vs_main"
 stage = "vertex"
 
 [[compile]]
-path = "live-encoder/src/resample.hlsl"
-entry = "ps_main"
-stage = "pixel"
-
-[[compile]]
-path = "live-selector/src/resample.hlsl"
-entry = "vs_main"
-stage = "vertex"
-
-[[compile]]
-path = "live-selector/src/resample.hlsl"
+path = "live-capture/src/resample.hlsl"
 entry = "ps_main"
 stage = "pixel"

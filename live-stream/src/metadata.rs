@@ -1,4 +1,4 @@
-//! Selector JSONL consumption and non-blocking stream-metadata posting.
+//! Capture-policy JSONL consumption and non-blocking stream-metadata posting.
 
 use std::{
     io::{BufRead as _, BufReader},
@@ -15,7 +15,7 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 /// Bound each metadata request so an unavailable server cannot accumulate work.
 const POST_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// JSONL event emitted by `live-selector` in standalone and managed operation.
+/// JSONL event emitted by `live-capture` in standalone and managed operation.
 #[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SelectorEvent {
@@ -136,19 +136,19 @@ impl MetadataPoster {
 }
 
 /// Read complete selector JSON lines and forward only validated event shapes.
-pub fn spawn_selector_reader(
+pub fn spawn_capture_reader(
     stdout: ChildStdout,
     generation: u64,
     capture_mode: &'static str,
     poster: MetadataPoster) -> anyhow::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
-        .name(format!("selector-metadata-{generation}"))
-        .spawn(move || selector_reader(stdout, generation, capture_mode, &poster))
-        .context("failed to spawn selector metadata reader")
+        .name(format!("capture-metadata-{generation}"))
+        .spawn(move || capture_reader(stdout, generation, capture_mode, &poster))
+        .context("failed to spawn capture metadata reader")
 }
 
 /// Blocking line reader isolated from the supervisor control loop.
-fn selector_reader(
+fn capture_reader(
     stdout: ChildStdout,
     generation: u64,
     capture_mode: &'static str,
@@ -161,17 +161,17 @@ fn selector_reader(
             Ok(0) => break,
             Ok(_) if line.len() > MAX_EVENT_BYTES => {
                 log::warn!(
-                    "generation {generation}: ignoring oversized selector metadata line ({} bytes)",
+                    "generation {generation}: ignoring oversized capture metadata line ({} bytes)",
                     line.len());
             }
             Ok(_) => match serde_json::from_str::<SelectorEvent>(line.trim_end()) {
                 Ok(event) => poster.post_event(generation, event, capture_mode),
                 Err(error) => log::warn!(
-                    "generation {generation}: invalid selector metadata JSON: {error}"),
+                    "generation {generation}: invalid capture metadata JSON: {error}"),
             },
             Err(error) => {
                 log::warn!(
-                    "generation {generation}: failed to read selector metadata: {error}");
+                    "generation {generation}: failed to read capture metadata: {error}");
                 break;
             }
         }

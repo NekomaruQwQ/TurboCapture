@@ -6,7 +6,6 @@
 
 use crate::audio::AudioState;
 use crate::kpm::KpmState;
-use crate::selector::SelectorConfig;
 use crate::strings::StringStore;
 use crate::video::VideoState;
 
@@ -16,7 +15,6 @@ use tokio::sync::RwLock;
 /// Top-level server state shared across all Axum handlers.
 pub struct AppState {
     pub strings: RwLock<StringStore>,
-    pub selector: RwLock<SelectorConfig>,
     pub video: VideoState,
     pub kpm: KpmState,
     pub audio: AudioState,
@@ -26,7 +24,6 @@ impl AppState {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             strings: RwLock::new(StringStore::new(data_dir)),
-            selector: RwLock::new(SelectorConfig::load(data_dir)),
             video: VideoState::new(),
             kpm: KpmState::new(),
             audio: AudioState::new(),

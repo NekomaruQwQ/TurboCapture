@@ -1,6 +1,6 @@
-# Live Stream Pipeline Refactor
+# Live Stream Pipeline Refactor (Archived)
 
-**Status:** In progress — Phase 5 complete
+**Status:** Complete and archived
 
 ## Purpose
 
@@ -439,7 +439,7 @@ The dedicated wrapper crate was removed. `live-encoder` still sees only generic
 mode or name. Replacing that transitional direct-capture input with the canonical
 shared-texture capture path remains part of final cutover.
 
-### Phase 6 — Verify the transitional pipeline
+### Phase 6 — Verify the transitional pipeline (Complete)
 
 - Exercise standalone safe sharing through `live-selector`.
 - Exercise managed capture through
@@ -449,7 +449,15 @@ shared-texture capture path remains part of final cutover.
 - Remove the encoder's legacy direct-capture path only after shared-texture input
   meets the compatibility and performance gates.
 
-### Phase 7 — Final rename, cutover, and cleanup
+The release verification baseline passed before cutover. Existing Phase 3/4
+hardware runs had already exercised allowed-window publication at 1920×1200/60,
+private-copy performance, keyed-mutex abandonment, generation replacement,
+independent child recovery, server unavailability, and Job Object cleanup. The
+final transitional workspace test run passed all then-current tests, including
+profile reload/fail-closed behavior and protocol compatibility, before the
+legacy encoder inputs were removed.
+
+### Phase 7 — Final rename, cutover, and cleanup (Complete)
 
 - Rename `live-selector` to `live-capture` as the final component rename.
 - Make the local TOML file and output dimensions the capture binary's primary
@@ -465,6 +473,31 @@ shared-texture capture path remains part of final cutover.
 - Update the README architecture diagram, CLI reference, file tree, deployment
   examples, and lessons learned to describe the completed design.
 - Archive this plan after its acceptance criteria are satisfied.
+
+The selector lineage is now `live-capture`, with local profile TOML plus output
+dimensions as its standalone interface and headless managed publication for
+production. A supervisor-only generic HWND/crop source lets YouTube Music use
+the same shared-texture producer without placing special-stream policy in either
+GPU worker.
+
+`live-encoder` now accepts only an inherited fixed-size shared texture. Its
+legacy capture modes, selector HTTP client, WGC code, resampler, shaders, and
+direct-input branch were removed. Both `live-stream` modes now own
+`live-capture -> shared texture -> live-encoder -> live-ws`; the temporary proof
+binary, transitional launchers, and unused server selector-config API were also
+removed.
+
+The post-cutover workspace passed 76 release tests, a release workspace build,
+and clippy for every changed crate. A bounded main-mode hardware smoke created
+the final cohort, initialized the hardware encoder, tolerated an unavailable
+server, exited successfully, and left no managed workers alive.
+
+The final YouTube Music hardware run found the titled window, computed crop
+`(3,1190)..(2209,1310)`, created a 2208×128 shared texture on the RTX 5090
+Laptop GPU, launched the complete capture/encoder/relay cohort, and captured the
+intended HWND. The encoder measured 202.7 µs average private-copy submission
+while the deliberately unavailable server exercised relay reconnection. The
+bounded run completed successfully and left no managed worker alive.
 
 ## Safety and Error Handling
 

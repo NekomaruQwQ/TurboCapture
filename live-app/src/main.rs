@@ -1,7 +1,7 @@
 //! Minimal wry webview host for Nekomaru LiveUI.
 
 use nkcore::prelude::*;
-use nkcore::os::windows::winit::{
+use nkcore::winit::{
     AppEvent,
     EventLoopExt as _,
 };

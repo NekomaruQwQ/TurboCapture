@@ -1,11 +1,10 @@
 //! Worker info endpoints.
 //!
-//! Internal HTTP endpoints called by capture workers to report metadata.
+//! Internal HTTP endpoints called by `live-stream` to report capture metadata.
 //!
 //! ## Routes
 //!
-//! - `POST /internal/streams/:streamId/info` — capture metadata from the
-//!   transitional auto encoder or the `live-stream` supervisor.
+//! - `POST /internal/streams/:streamId/info` — supervised capture metadata.
 
 use crate::state::AppState;
 
@@ -40,7 +39,6 @@ pub fn router() -> Router<Arc<AppState>> {
 #[derive(Deserialize)]
 struct StreamInfoBody {
     /// Whether the stream currently has an allowed selected target.
-    #[serde(default = "default_active")]
     active: bool,
     #[expect(dead_code, reason = "received but not used by the server")]
     hwnd: String,
@@ -48,21 +46,14 @@ struct StreamInfoBody {
     file_description: String,
     /// Selector profile label used by frontend color-key selection.
     mode: Option<String>,
-    /// Supervisor-owned topology name; absent legacy requests remain `auto`.
-    #[serde(default = "default_capture_mode")]
+    /// Supervisor-owned topology name.
     capture_mode: String,
 }
 
-/// Legacy requests predate the explicit lifecycle field and are active updates.
-const fn default_active() -> bool { true }
-
-/// Preserve the transitional encoder's historical computed metadata value.
-fn default_capture_mode() -> String { "auto".to_owned() }
-
-/// `POST /internal/streams/:streamId/info` — periodic capture metadata.
+/// `POST /internal/streams/:streamId/info` — capture transition metadata.
 ///
-/// Transitional auto mode sends periodic active updates. `live-stream` sends
-/// selection transitions and explicit inactive updates during generation loss.
+/// `live-stream` sends selection transitions and explicit inactive updates
+/// during generation loss.
 async fn stream_info(
     State(state): State<Arc<AppState>>,
     Path(_stream_id): Path<String>,
@@ -97,15 +88,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_metadata_defaults_to_active_auto_mode() {
-        let body: StreamInfoBody = serde_json::from_str(r#"{
+    fn metadata_requires_explicit_supervisor_lifecycle() {
+        let result = serde_json::from_str::<StreamInfoBody>(r#"{
             "hwnd": "0x1234",
             "title": "Editor",
             "file_description": "Code",
             "mode": "code"
-        }"#).unwrap();
-        assert!(body.active);
-        assert_eq!(body.capture_mode, "auto");
+        }"#);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -116,9 +106,9 @@ mod tests {
             "title": "",
             "file_description": "",
             "mode": null,
-            "capture_mode": "shared"
+            "capture_mode": "main"
         }"#).unwrap();
         assert!(!body.active);
-        assert_eq!(body.capture_mode, "shared");
+        assert_eq!(body.capture_mode, "main");
     }
 }

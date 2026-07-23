@@ -1,8 +1,8 @@
 //! `live-server` — M4 relay server for Nekomaru LiveUI.
 //!
 //! Thin HTTP/WS relay.  All capture intelligence lives in the Rust workers
-//! (`live-encoder`, `live-kpm`). The server relays binary frames, stores
-//! config, and proxies frontend assets from Vite.
+//! (`live-capture`, `live-encoder`, `live-kpm`). The server relays binary
+//! frames, stores presentation strings, and proxies frontend assets from Vite.
 //!
 //! ## Usage
 //!
@@ -14,7 +14,6 @@ mod audio;
 mod events;
 mod events_ws;
 mod kpm;
-mod selector;
 mod state;
 mod strings;
 mod util;
@@ -89,7 +88,6 @@ async fn main() {
             .merge(kpm::router())
             .merge(audio::router())
             .merge(strings::router())
-            .merge(selector::router())
             .merge(events::router())
             .merge(events_ws::router())
             .route("/api/refresh", post(refresh))
@@ -114,10 +112,9 @@ async fn main() {
 
 // ── Refresh ─────────────────────────────────────────────────────────────
 
-/// `POST /api/refresh` — reload string store and selector config from disk.
+/// `POST /api/refresh` — reload the string store from disk.
 async fn refresh(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     state.strings.write().await.reload();
-    state.selector.write().await.reload();
     Json(serde_json::json!({ "ok": true }))
 }
 

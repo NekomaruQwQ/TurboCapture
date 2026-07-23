@@ -1,15 +1,12 @@
-//! `live-encoder` library — legacy capture plus the reusable encode pipeline.
+//! `live-encoder` library — fixed shared-texture H.264 pipeline.
 //!
-//! Provides the GPU capture pipeline components and H.264 NAL unit types
-//! used by both the binary and the encoder callback.
+//! Provides the GPU conversion, Media Foundation encoder, and H.264 NAL types
+//! used by the managed worker and encoder callback.
 
-pub mod capture;
 pub mod converter;
 pub mod d3d11;
 pub mod encoder;
 pub mod pipeline;
-pub mod resample;
-pub mod selector;
 
 // ── H.264 NAL Unit Types ────────────────────────────────────────────────────
 

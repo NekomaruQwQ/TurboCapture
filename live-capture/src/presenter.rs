@@ -1,4 +1,4 @@
-//! D3D11 swap-chain presentation for the selector preview window.
+//! D3D11 swap-chain presentation for the optional capture preview window.
 //!
 //! Captured BGRA textures stay on the GPU: the shared capture resampler draws
 //! directly into the fixed-size swap-chain backbuffer, then DXGI presents it.

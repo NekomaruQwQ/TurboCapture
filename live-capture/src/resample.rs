@@ -1,9 +1,4 @@
-//! Preview-owned GPU texture resampler using a fullscreen quad.
-//!
-//! The shader starts identical to the original `live-capture` resampler (now
-//! `live-encoder`), but its source
-//! and compiled bytecode live beside `live-selector` so preview filtering can
-//! evolve without changing encoded stream pixels.
+//! Capture-owned GPU texture resampler using a fullscreen quad.
 
 use nkcore::debug::*;
 use nkcore::prelude::*;
