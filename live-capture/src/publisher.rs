@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use live_shared_texture::{
+use live_capture_shared::{
     AcquireStatus,
     CONSUMER_KEY,
     InheritedHandle,

@@ -7,7 +7,7 @@ edition = { workspace = true }
 workspace = true
 
 [dependencies]
-live-shared-texture = { path = "../crates/live-shared-texture" }
+live-capture-shared = { path = "../live-capture-shared" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

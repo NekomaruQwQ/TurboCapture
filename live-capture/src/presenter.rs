@@ -10,7 +10,7 @@ use crate::{
     resample::Resampler,
 };
 use nkcore::prelude::euclid::Size2D;
-use live_shared_texture::AdapterLuid;
+use live_capture_shared::AdapterLuid;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::{

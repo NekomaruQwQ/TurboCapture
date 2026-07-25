@@ -1,4 +1,4 @@
-//! Cross-process D3D11 texture mailbox shared by the video workers.
+//! Cross-process D3D11 texture mailbox shared by capture and encoding workers.
 //!
 //! The supervisor owns the NT shared handle and underlying BGRA texture. Each
 //! worker opens that handle on the explicitly selected adapter, then uses a

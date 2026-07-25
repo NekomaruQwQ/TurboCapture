@@ -30,7 +30,7 @@ live-encoder/Cargo.toml                     human
 live-kpm/Cargo.toml                         human
 live-server/Cargo.toml                      human
 live-stream/Cargo.toml                      human
-crates/live-shared-texture/Cargo.toml       human
+live-capture-shared/Cargo.toml              human
 crates/enumerate-windows/Cargo.toml         human
 crates/set-dpi-awareness/Cargo.toml         human
 
@@ -77,7 +77,7 @@ src/resample.hlsl                           human
 src/selector/mod.rs                         agent
 src/selector/config.rs                      agent
 
-## crates/live-shared-texture/
+## live-capture-shared/
 src/lib.rs                                  agent
 
 ## live-encoder/

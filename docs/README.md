@@ -137,7 +137,7 @@ graph LR
 | Component | Language | Role | I/O |
 |-----------|----------|------|-----|
 | **`live-protocol`** | Rust (lib) | Shared 8-byte frame header + AVCC helpers + audio payloads | Used by all Rust crates |
-| **`live-shared-texture`** | Rust (internal lib) | Explicit-adapter NT handle and keyed-mutex mailbox contract | inherited handle → shared BGRA texture |
+| **`live-capture-shared`** | Rust (internal lib) | Explicit-adapter NT handle and keyed-mutex mailbox contract | inherited handle → shared BGRA texture |
 | **`live-stream`** | Rust | Main and YouTube Music shared-texture modes, Job-contained process supervision, metadata, and restart policy | mode config + worker paths → managed video stream |
 | **`live-encoder`** | Rust | Shared/private BGRA → NV12 → H.264 → stdout pipeline | shared BGRA texture → live-protocol framed stdout |
 | **`live-audio`** | Rust | WASAPI audio capture → s16le PCM | stdout (live-protocol framed) |
@@ -181,22 +181,6 @@ livestream stack.
 | YouTube Music capture | Rust (`live-stream --mode youtube-music`) | DPI-independent crop policy and window rediscovery compose generic capture, the shared encoder, and `live-ws`. |
 | Orchestration | Nushell (`mod.nu`) | Launches pipelines, manages service lifecycle. |
 | Frontend | Svelte 5 + WebCodecs | Pure viewer. Receives `live-protocol` framed messages via WS. Zero H.264 knowledge. |
-
-### Why Rust for the Server?
-
-The initial M4 design chose a TypeScript server (Bun/Hono) because the three M3 RIIR rationales no longer applied in a microservice architecture (see [`ARCHIVE-M4-DESIGN.md` § Why TypeScript Again](ARCHIVE-M4-DESIGN.md#why-typescript-again)).  During implementation, the balance tipped back to Rust.
-
-**What changed:** the "opaque relay" assumption broke down.  The server's `/init` endpoint must parse CodecParams and build `avc1.*` codec strings + avcC descriptors — the same logic in `live-protocol/src/avcc.rs`.  In TypeScript this meant maintaining `codec.ts` as a hand-written mirror (~100 lines) that had to stay in sync.  In Rust, the server calls `live-protocol` directly — zero duplication.
-
-| TS Benefit (from M4 design) | Reassessment |
-|---|---|
-| Faster iteration (HMR) | Full server restart preferred — HMR can leave stale state.  Compile time is not an issue since every `just` recipe runs `cargo build --release` anyway. |
-| Native Vite integration | `vite_proxy.rs` from M3 already solves this — a Rust reverse proxy to the Vite dev server. |
-| No binary parsing | Not true — `codec.ts` duplicated `live-protocol` for the `/init` endpoint. |
-| WS ergonomics | Overstated — Axum's `WebSocketUpgrade` extractor + `tokio::sync::broadcast` handles the relay fan-out pattern cleanly. |
-| Portfolio (full-stack TS) | Frontend is still Svelte/TypeScript/Bun, so the project remains hybrid. |
-
-**The decisive gain:** single toolchain.  `cargo build --release` builds every binary in the project.  No Bun, no `node_modules`, no second package manager for the server.
 
 ### Well-Known Stream IDs
 
@@ -256,7 +240,6 @@ The system is launched via **`just`** recipes (`.justfile`) backed by **Nushell*
 | `just bun <args>` | Run Bun in `frontend/` |
 | `just tsc [args]` | Type-check the frontend with `bunx --bun tsc --noEmit` |
 | `just svc [args]` | Check Svelte components with `bunx --bun svelte-check` |
-| `just cargo <command> [args]` | Compile shaders, then run the requested Cargo command with `--release` |
 | `just push [bookmark] [revision]` | Move a jj bookmark and push to GitHub |
 | `just pull [bookmark]` | Fetch from GitHub and create a new working copy |
 | `just get <path> [args]` | Make an HTTP GET request |
@@ -849,7 +832,7 @@ LiveUI/
 │       ├── avcc.rs                  # Annex B → AVCC conversion, codec string, avcC builder
 │       └── video.rs                 # CodecParams + Frame payload serialization
 │
-├── crates/live-shared-texture/      # Shared D3D11 mailbox contract
+├── live-capture-shared/             # Shared D3D11 mailbox contract
 │   └── src/
 │       └── lib.rs                   # Adapter, scoped NT handle, descriptor, mutex + loss contract
 │

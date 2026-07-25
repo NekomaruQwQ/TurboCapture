@@ -19,7 +19,7 @@ use std::{
 use anyhow::Context as _;
 use clap::{Parser, ValueEnum};
 use euclid::default::Size2D;
-use live_shared_texture::OwnedMailbox;
+use live_capture_shared::OwnedMailbox;
 use metadata::{MetadataPoster, spawn_capture_reader};
 use restart::{Component, RecoveryScope, RestartBackoff, recovery_scope};
 use win32job::{ExtendedLimitInfo, Job};

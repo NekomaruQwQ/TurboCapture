@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use live_shared_texture::RESOURCE_GENERATION_LOST_EXIT_CODE;
+use live_capture_shared::RESOURCE_GENERATION_LOST_EXIT_CODE;
 
 /// Delay before the first restart in one consecutive-failure sequence.
 const INITIAL_BACKOFF: Duration = Duration::from_millis(250);

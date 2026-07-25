@@ -28,7 +28,7 @@ use nkcore::{
     prelude::euclid::Size2D,
     winit::{AppEvent, EventLoopExt as _},
 };
-use live_shared_texture::{
+use live_capture_shared::{
     AdapterLuid,
     RESOURCE_GENERATION_LOST_EXIT_CODE,
     ResourceGenerationLost,

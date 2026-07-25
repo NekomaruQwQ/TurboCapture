@@ -10,8 +10,8 @@ members = [
     "live-server",
     "live-stream",
     "live-ws",
+    "live-capture-shared",
     "crates/enumerate-windows",
-    "crates/live-shared-texture",
     "crates/set-dpi-awareness",
 ]
 

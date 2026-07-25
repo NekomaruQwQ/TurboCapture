@@ -17,7 +17,7 @@ use live_encoder::pipeline::{
     VideoEncoderConfig,
     spawn_stdout_encoder,
 };
-use live_shared_texture::{
+use live_capture_shared::{
     AdapterLuid,
     RESOURCE_GENERATION_LOST_EXIT_CODE,
     ResourceGenerationLost,
@@ -82,7 +82,7 @@ fn validate_dimensions(width: u32, height: u32) -> anyhow::Result<()> {
 /// Encode private copies consumed from the supervisor-owned latest-frame mailbox.
 fn run(args: &Args) -> anyhow::Result<()> {
     let frame_size = Size2D::new(args.width, args.height);
-    let bundle = live_shared_texture::create_device_on_adapter(args.adapter_luid, true)
+    let bundle = live_capture_shared::create_device_on_adapter(args.adapter_luid, true)
         .map_err(|error| ResourceGenerationLost::new(format!(
             "failed to create encoder device on supervisor-selected adapter: {error:#}")))?;
     log::info!(

@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::Context as _;
 use euclid::default::{Box2D, Point2D, Size2D, Vector2D};
-use live_shared_texture::OwnedMailbox;
+use live_capture_shared::OwnedMailbox;
 use windows::Win32::{
     Foundation::{HWND, RECT},
     UI::{

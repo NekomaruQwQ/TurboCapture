@@ -15,7 +15,7 @@ use crate::{
 use live_protocol::{MessageType, flags, write_message};
 use live_protocol::avcc::serialize_avcc_payload;
 use live_protocol::video::{CodecParams, write_codec_params_payload, write_frame_payload};
-use live_shared_texture::{
+use live_capture_shared::{
     AcquireStatus,
     CONSUMER_KEY,
     InheritedHandle,

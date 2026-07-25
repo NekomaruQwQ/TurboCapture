@@ -1367,7 +1367,7 @@ dependencies = [
  "anyhow",
  "clap",
  "enumerate-windows",
- "live-shared-texture",
+ "live-capture-shared",
  "log",
  "nkcore-windows",
  "pretty_env_logger",
@@ -1383,13 +1383,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "live-capture-shared"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "euclid",
+ "log",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "live-encoder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "live-capture-shared",
  "live-protocol",
- "live-shared-texture",
  "log",
  "nkcore-windows",
  "pretty_env_logger",
@@ -1433,16 +1443,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "live-shared-texture"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "euclid",
- "log",
- "windows 0.62.2",
-]
-
-[[package]]
 name = "live-stream"
 version = "0.1.0"
 dependencies = [
@@ -1450,7 +1450,7 @@ dependencies = [
  "clap",
  "enumerate-windows",
  "euclid",
- "live-shared-texture",
+ "live-capture-shared",
  "log",
  "pretty_env_logger",
  "serde",

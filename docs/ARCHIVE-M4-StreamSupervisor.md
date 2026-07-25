@@ -363,7 +363,7 @@ This rename frees the `live-capture` name while retaining the existing
 - Record acquisition misses, copy time, conversion time, and encoded frame rate
   in release builds.
 
-The implemented Phase 3 slice adds the internal `live-shared-texture` contract,
+The implemented Phase 3 slice adds the internal `live-capture-shared` contract,
 managed `live-selector` publication, `live-encoder --mode shared`, and the
 temporary `live-texture-proof` owner. The owner selects one adapter, creates and
 retains an unnamed NT handle, enables inheritance only across the two intended

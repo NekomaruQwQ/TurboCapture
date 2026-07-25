@@ -19,9 +19,6 @@ tsc *args:
 # Run the specified `svelte-check` command in the frontend directory.
 svc *args:
     cd frontend; bunx --bun svelte-check --tsconfig tsconfig.json {{args}}
-# Run the specified `cargo` command.
-cargo command *args: compile-shaders
-    cargo {{command}} --release {{args}}
 
 # == Recipes for JJ version control ==
 # Move the specified bookmark to the specified revision and push all changes to GitHub.

@@ -1,5 +1,5 @@
 [package]
-name = "live-shared-texture"
+name = "live-capture-shared"
 version = { workspace = true }
 edition = { workspace = true }
 

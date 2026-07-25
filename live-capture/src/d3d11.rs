@@ -7,7 +7,7 @@ use nkcore::*;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::*;
 
-use live_shared_texture::AdapterLuid;
+use live_capture_shared::AdapterLuid;
 
 /// Create a D3D11 device on an explicit managed adapter or the standalone default.
 ///
@@ -21,9 +21,9 @@ pub fn create_device(
     adapter_luid: Option<AdapterLuid>)
     -> anyhow::Result<(IDXGIFactory6, ID3D11Device, ID3D11DeviceContext)> {
     let bundle = if let Some(adapter_luid) = adapter_luid {
-        live_shared_texture::create_device_on_adapter(adapter_luid, false)?
+        live_capture_shared::create_device_on_adapter(adapter_luid, false)?
     } else {
-        live_shared_texture::create_high_performance_device(false)?
+        live_capture_shared::create_high_performance_device(false)?
     };
     log::info!("device: {} ({})", bundle.adapter_name, bundle.adapter_luid);
     Ok((bundle.factory, bundle.device, bundle.context))
