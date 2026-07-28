@@ -104,7 +104,7 @@ graph LR
 
     subgraph server["Server (Axum)"]
         relay["<b>WS Relay</b><br/>peek header bytes 0-1<br/>cache CodecParams + keyframe<br/>fan-out to clients"]
-        strings["<b>String Store</b><br/>file-backed + computed<br/>($captureInfo, $liveMode)"]
+        strings["<b>String Store</b><br/>file-backed + computed<br/>($captureInfo, $liveProfile)"]
     end
 
     subgraph frontend["Browser / live-app"]
@@ -543,7 +543,7 @@ Server-managed key-value store. Keys prefixed with `$` are **computed strings** 
 |-----|--------|-------------|
 | `$captureInfo` | `POST /internal/streams/:id/info` | Human-readable label for the captured window |
 | `$captureMode` | `POST /internal/streams/:id/info` | Current topology (e.g. `"auto"`, `"main"`) |
-| `$liveMode` | `POST /internal/streams/:id/info` | Matched legacy tag or first matching enabled TOML profile (e.g. `"code"`, `"game"`) |
+| `$liveProfile` | `POST /internal/streams/:id/info` | First enabled TOML profile matching the selected window (e.g. `"code"`, `"game"`) |
 | `$microphone` | Audio encoder connect/disconnect | Audio stream status (present when `live-audio` encoder is connected, absent otherwise) |
 | `$timestamp` | Server startup | Revision timestamp via `jj log` |
 | `$claudeTokens` | `run-ccusage` poller | Today's total Claude Code token count (raw integer; frontend formats to millions) |
@@ -587,10 +587,12 @@ Updates computed strings without putting HTTP on the capture hot path.
 
 ```json
 {
+    "active": true,
     "hwnd": "0x1A2B",
     "title": "Visual Studio Code",
     "file_description": "Visual Studio Code",
-    "mode": "code"
+    "profile": "code",
+    "capture_mode": "main"
 }
 ```
 
@@ -731,7 +733,7 @@ The `<StreamRenderer>` component accepts `colorKey?: string | string[]` (up to 8
 #### Strings-Gated Keys (Main Stream)
 
 For the main stream, `App.svelte` chooses the active key set from the
-`$captureInfo` / `$liveMode` strings, so keys track the captured profile.
+`$captureInfo` / `$liveProfile` strings, so keys track the captured profile.
 `live-capture` emits a complete JSONL transition before dispatching the matching
 capture swap. `live-stream` drains that low-frequency stdout on a dedicated
 thread and queues the HTTP update to a bounded-time metadata worker. Capture
@@ -915,7 +917,7 @@ LiveUI/
 │       │   ├── worklet.ts           # AudioWorklet PCM ring buffer processor
 │       │   └── worklet-env.d.ts     # Ambient types for AudioWorklet context
 │       ├── components/              # Stage + reusable Svelte primitives
-│       ├── widgets/                 # LiveWidget + Clock, LiveMode, ClaudeUsage, and About widgets
+│       ├── widgets/                 # LiveWidget + Clock, LiveProfile, ClaudeUsage, and About widgets
 │       └── video/
 │           ├── StreamRenderer.svelte  # <StreamRenderer> (canvas + color-key)
 │           ├── stream-loop.ts         # WS reader → live-protocol parser → decoder

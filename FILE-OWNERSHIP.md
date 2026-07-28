@@ -147,7 +147,7 @@ Marquee.svelte                              agent
 AboutWidget.svelte                          human
 ClaudeUsageWidget.svelte                    human
 ClockWidget.svelte                          human
-LiveModeWidget.svelte                       human
+LiveProfileWidget.svelte                    human
 LiveWidget.svelte                           human
 
 ## frontend/src/video/

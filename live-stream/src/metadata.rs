@@ -34,7 +34,7 @@ pub enum SelectorEvent {
     Cleared,
 }
 
-/// Server request body extending the legacy auto-mode metadata contract.
+/// Server request body carrying one complete capture-selection transition.
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
 struct StreamInfoUpdate {
     /// Whether target-specific computed strings should be present.
@@ -46,7 +46,7 @@ struct StreamInfoUpdate {
     /// Preferred human-readable capture label.
     file_description: String,
     /// Selector profile label used by frontend presentation policy.
-    mode: Option<String>,
+    profile: Option<String>,
     /// Supervisor-owned stream topology name.
     capture_mode: String,
 }
@@ -65,7 +65,7 @@ impl StreamInfoUpdate {
                 hwnd,
                 title,
                 file_description,
-                mode: Some(profile),
+                profile: Some(profile),
                 capture_mode: capture_mode.to_owned(),
             },
             SelectorEvent::Cleared => Self::inactive(capture_mode),
@@ -79,7 +79,7 @@ impl StreamInfoUpdate {
             hwnd: String::new(),
             title: String::new(),
             file_description: String::new(),
-            mode: None,
+            profile: None,
             capture_mode: capture_mode.to_owned(),
         }
     }
@@ -89,7 +89,7 @@ impl StreamInfoUpdate {
 struct PostTask {
     /// Resource generation active when this transition was observed.
     generation: u64,
-    /// Complete backward-compatible server update.
+    /// Complete server metadata update.
     update: StreamInfoUpdate,
 }
 
@@ -225,8 +225,23 @@ mod tests {
         let update = StreamInfoUpdate::from_event(event, "main");
         assert!(update.active);
         assert_eq!(update.hwnd, "0x1234");
-        assert_eq!(update.mode.as_deref(), Some("code"));
+        assert_eq!(update.profile.as_deref(), Some("code"));
         assert_eq!(update.capture_mode, "main");
+    }
+
+    #[test]
+    fn selected_update_serializes_profile_field() {
+        let update = StreamInfoUpdate {
+            active: true,
+            hwnd: "0x1234".to_owned(),
+            title: "Editor".to_owned(),
+            file_description: "Code".to_owned(),
+            profile: Some("code".to_owned()),
+            capture_mode: "main".to_owned(),
+        };
+        let value = serde_json::to_value(update).unwrap();
+        assert_eq!(value["profile"], "code");
+        assert!(value.get("mode").is_none());
     }
 
     #[test]
@@ -234,7 +249,7 @@ mod tests {
         let update = StreamInfoUpdate::from_event(SelectorEvent::Cleared, "main");
         assert!(!update.active);
         assert!(update.hwnd.is_empty());
-        assert!(update.mode.is_none());
+        assert!(update.profile.is_none());
         assert_eq!(update.capture_mode, "main");
     }
 }

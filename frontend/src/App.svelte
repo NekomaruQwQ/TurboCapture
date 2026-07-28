@@ -4,16 +4,16 @@
     import { strings } from "@/events.svelte";
     import Marquee from "@/components/Marquee.svelte";
     import Grid from "@/components/Grid.svelte";
-    import LiveModeWidget from "@/widgets/LiveModeWidget.svelte";
+    import LiveProfileWidget from "@/widgets/LiveProfileWidget.svelte";
     import ClaudeUsageWidget from "@/widgets/ClaudeUsageWidget.svelte";
     import AboutWidget from "@/widgets/AboutWidget.svelte";
     import KpmMeter from "@/KpmMeter.svelte";
     import ClockWidget from "@/widgets/ClockWidget.svelte";
     import Stage from "@/components/Stage.svelte";
 
-    const liveMode = $derived(strings.value.$liveMode ?? "-");
+    const liveProfile = $derived(strings.value.$liveProfile ?? "-");
     const appRendererProps: Partial<StreamRendererProps> = $derived.by(() => {
-        if (liveMode === "code") {
+        if (liveProfile === "code") {
             return {
                 colorKey: ["#1d2129", "#282e3a"],
                 colorKeyKnee: [0, 0.2],
@@ -48,7 +48,7 @@
                     </Grid>
                 </div>
                 <div class="island glow px-2 py-1.5">
-                    <LiveModeWidget />
+                    <LiveProfileWidget />
                 </div>
                 <div class="island glow px-2 py-1.5">
                     <ClaudeUsageWidget />
@@ -70,7 +70,7 @@
                 </div>
                 <div
                     id="main-stream"
-                    class={`island flex-col flex-1 rounded-md items-center justify-center ${(liveMode === "code" ? "glow" : " bg-[#1d1d1d]!")}`}>
+                    class={`island flex-col flex-1 rounded-md items-center justify-center ${(liveProfile === "code" ? "glow" : " bg-[#1d1d1d]!")}`}>
                     <StreamRenderer streamId="main" {...appRendererProps} />
                 </div>
             </Grid>

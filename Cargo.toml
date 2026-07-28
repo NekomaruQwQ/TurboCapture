@@ -54,8 +54,6 @@ ureq = "3"
 widestring = "1.2.1"
 win32-version-info = "0.3.0"
 win32job = "2.0.3"
-
-# LOCK: wry@0.55.0 depends on windows@^0.61
 windows = { version = "0.62.2", features = ["Win32_Foundation"] }
 
 [workspace.dependencies.reqwest]

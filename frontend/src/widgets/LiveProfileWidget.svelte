@@ -3,8 +3,8 @@
     import LiveWidget from "./LiveWidget.svelte";
     import { strings } from "@/events.svelte";
 
-    /// Display labels and icons for each mode value.
-    const MODE_MAP = {
+    /// Display labels and icons for each capture profile.
+    const PROFILE_MAP = {
         unknown: { label: "—", icon: "activity" },
         code: { label: "Coding", icon: "bug" },
         game: { label: "Gaming", icon: "gamepad" },
@@ -13,18 +13,18 @@
         brb: { label: "BRB", icon: "coffee" },
     } as const;
 
-    let mode = $derived(
-        (strings.value.$liveMode
-            && MODE_MAP[strings.value.$liveMode as keyof typeof MODE_MAP])
-            || MODE_MAP.unknown);
+    let profile = $derived(
+        (strings.value.$liveProfile
+            && PROFILE_MAP[strings.value.$liveProfile as keyof typeof PROFILE_MAP])
+            || PROFILE_MAP.unknown);
     let captureMode = $derived(strings.value.$captureMode?.toUpperCase() ?? "UNKNOWN");
     let captureInfo = $derived(strings.value.$captureInfo ?? "");
 </script>
 
-<!-- Shows the current live mode derived from the auto-selector's `@mode` tag. -->
+<!-- Shows the presentation associated with the selected window's capture profile. -->
 <LiveWidget name={`Live Capture - ${captureMode}`}>
     {#snippet icon()}
-        <Icon name={mode.icon} size={40} />
+        <Icon name={profile.icon} size={40} />
     {/snippet}
-    <span class="text-lg">{mode.label} - {captureInfo}</span>
+    <span class="text-lg">{profile.label} - {captureInfo}</span>
 </LiveWidget>

@@ -21,11 +21,11 @@ use std::sync::Arc;
 /// Human-readable label for the captured window.
 const CSID_CAPTURE_INFO: &str = "$captureInfo";
 
-/// Current capture mode (e.g. `"auto"`).
+/// Supervisor-owned capture topology (e.g. `"main"`).
 const CSID_CAPTURE_MODE: &str = "$captureMode";
 
-/// Mode tag from the matched pattern (e.g. `"code"`, `"game"`).
-const CSID_LIVE_MODE: &str = "$liveMode";
+/// Profile matched by the selected window (e.g. `"code"`, `"game"`).
+const CSID_LIVE_PROFILE: &str = "$liveProfile";
 
 // ── Routes ──────────────────────────────────────────────────────────────
 
@@ -37,6 +37,7 @@ pub fn router() -> Router<Arc<AppState>> {
 // ── Stream Info ─────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StreamInfoBody {
     /// Whether the stream currently has an allowed selected target.
     active: bool,
@@ -45,7 +46,7 @@ struct StreamInfoBody {
     title: String,
     file_description: String,
     /// Selector profile label used by frontend color-key selection.
-    mode: Option<String>,
+    profile: Option<String>,
     /// Supervisor-owned topology name.
     capture_mode: String,
 }
@@ -69,14 +70,14 @@ async fn stream_info(
             body.file_description
         };
         store.set_computed(CSID_CAPTURE_INFO, info);
-        if let Some(mode) = body.mode {
-            store.set_computed(CSID_LIVE_MODE, mode);
+        if let Some(profile) = body.profile {
+            store.set_computed(CSID_LIVE_PROFILE, profile);
         } else {
-            store.clear_computed(CSID_LIVE_MODE);
+            store.clear_computed(CSID_LIVE_PROFILE);
         }
     } else {
         store.clear_computed(CSID_CAPTURE_INFO);
-        store.clear_computed(CSID_LIVE_MODE);
+        store.clear_computed(CSID_LIVE_PROFILE);
     }
     drop(store);
 
@@ -93,7 +94,7 @@ mod tests {
             "hwnd": "0x1234",
             "title": "Editor",
             "file_description": "Code",
-            "mode": "code"
+            "profile": "code"
         }"#);
         assert!(result.is_err());
     }
@@ -105,10 +106,23 @@ mod tests {
             "hwnd": "",
             "title": "",
             "file_description": "",
-            "mode": null,
+            "profile": null,
             "capture_mode": "main"
         }"#).unwrap();
         assert!(!body.active);
         assert_eq!(body.capture_mode, "main");
+    }
+
+    #[test]
+    fn legacy_mode_field_is_rejected() {
+        let result = serde_json::from_str::<StreamInfoBody>(r#"{
+            "active": true,
+            "hwnd": "0x1234",
+            "title": "Editor",
+            "file_description": "Code",
+            "mode": "code",
+            "capture_mode": "main"
+        }"#);
+        assert!(result.is_err());
     }
 }

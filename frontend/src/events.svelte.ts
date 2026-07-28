@@ -12,7 +12,7 @@
 import { runReconnectingWS } from "./ws";
 
 /// All server-managed strings.  Keys may be user-provided (`marquee`,
-/// `message`) or computed (`$liveMode`, `$captureMode`, `$captureInfo`,
+/// `message`) or computed (`$liveProfile`, `$captureMode`, `$captureInfo`,
 /// `$timestamp`).  Replaced wholesale on each server snapshot.
 class StringsStore {
     value = $state<Record<string, string>>({});
