@@ -5,7 +5,7 @@
     import Marquee from "@/components/Marquee.svelte";
     import Grid from "@/components/Grid.svelte";
     import LiveProfileWidget from "@/widgets/LiveProfileWidget.svelte";
-    import ClaudeUsageWidget from "@/widgets/ClaudeUsageWidget.svelte";
+    import TokenUsageWidget from "@/widgets/TokenUsageWidget.svelte";
     import AboutWidget from "@/widgets/AboutWidget.svelte";
     import KpmMeter from "@/KpmMeter.svelte";
     import ClockWidget from "@/widgets/ClockWidget.svelte";
@@ -51,7 +51,7 @@
                     <LiveProfileWidget />
                 </div>
                 <div class="island glow px-2 py-1.5">
-                    <ClaudeUsageWidget />
+                    <TokenUsageWidget />
                 </div>
                 <div class="island glow px-3 py-2 flex-1">
                     <pre class="font-sans font-light text-sm whitespace-pre-wrap wrap-break-word">{strings.value.message ?? ""}</pre>

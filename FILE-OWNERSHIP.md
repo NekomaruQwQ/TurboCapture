@@ -145,7 +145,7 @@ Marquee.svelte                              agent
 
 ## frontend/src/widgets/
 AboutWidget.svelte                          human
-ClaudeUsageWidget.svelte                    human
+TokenUsageWidget.svelte                     human
 ClockWidget.svelte                          human
 LiveProfileWidget.svelte                    human
 LiveWidget.svelte                           human
