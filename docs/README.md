@@ -427,6 +427,9 @@ adapter LUID and inherited handle, it publishes BGRA frames with a zero-timeout
 producer acquisition; a busy encoder drops only that publication and never
 stalls capture or local presentation.
 
+Captured frames exclude the mouse cursor by default. Pass `--capture-cursor`
+when a standalone or managed capture should include it.
+
 Every invocation emits line-delimited JSON selection transitions on stdout.
 This is a standalone debugging surface and the managed metadata contract; it is
 not media framing. Redirect it to the platform null device when it is unwanted.
@@ -445,6 +448,9 @@ just run capture
 # Direct standalone invocation
 live-capture --config data/live-capture.toml \
   --width 1920 --height 1200 --title "Live Capture"
+
+# Opt into including the mouse cursor
+live-capture --config data/live-capture.toml --capture-cursor
 
 # Preview without retaining JSONL diagnostics
 live-capture --config data/live-capture.toml > /dev/null

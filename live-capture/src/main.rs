@@ -21,7 +21,7 @@ use std::{
 use anyhow::Context as _;
 use clap::Parser;
 use crate::{
-    capture::{CaptureSession, CropBox},
+    capture::{CaptureOptions, CaptureSession, CropBox},
     selector::{SelectorCommand, SelectorConfig, spawn_selector},
 };
 use nkcore::{
@@ -104,6 +104,10 @@ struct Args {
     /// Preview window title.
     #[arg(long, default_value = "Live Capture")]
     title: String,
+
+    /// Include the mouse cursor in captured frames.
+    #[arg(long)]
+    capture_cursor: bool,
 
     /// Disable the preview window; valid only with managed shared output.
     #[arg(long, requires = "shared_handle")]
@@ -211,6 +215,8 @@ fn main() {
 /// initialization failures inside that callback panic with contextual messages.
 fn run(args: Args) -> anyhow::Result<()> {
     let source = resolve_source(&args)?;
+    let mut capture_options = CaptureOptions::default();
+    capture_options.capture_cursor = args.capture_cursor;
     set_dpi_awareness::per_monitor_v2().context("failed to enable per-monitor DPI awareness")?;
 
     // SAFETY: This runs once on the main thread before winit, WGC, or any
@@ -283,10 +289,11 @@ fn run(args: Args) -> anyhow::Result<()> {
             };
 
             log::info!(
-                "capture started: {}x{}, headless={}, HWND=0x{:X}",
+                "capture started: {}x{}, headless={}, capture_cursor={}, HWND=0x{:X}",
                 output_size.width,
                 output_size.height,
                 args.headless,
+                capture_options.capture_cursor,
                 preview_hwnd.0 as isize);
 
             let mut state = PreviewState {
@@ -294,6 +301,7 @@ fn run(args: Args) -> anyhow::Result<()> {
                 publisher,
                 swap_rx,
                 selected,
+                capture_options,
                 capture: None,
                 retry_at: Instant::now(),
                 occluded: false,
@@ -326,6 +334,8 @@ struct PreviewState {
     swap_rx: Option<mpsc::Receiver<SelectorCommand>>,
     /// Latest selected target retained across capture-session failures.
     selected: Option<SelectedTarget>,
+    /// Options reapplied whenever the WGC session is recreated.
+    capture_options: CaptureOptions,
     /// Active WGC session, recreated independently of selector polling.
     capture: Option<CaptureSession>,
     /// Earliest retry time after a recoverable WGC initialization error.
@@ -439,7 +449,8 @@ impl PreviewState {
 
         match CaptureSession::from_hwnd(
             self.presenter.device(),
-            HWND(target.hwnd as *mut core::ffi::c_void)) {
+            HWND(target.hwnd as *mut core::ffi::c_void),
+            &self.capture_options) {
             Ok(capture) => {
                 log::info!("capturing HWND 0x{:X} ({})", target.hwnd, target.capture_info);
                 self.capture = Some(capture);

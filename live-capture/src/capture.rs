@@ -1,6 +1,6 @@
 //! Windows Graphics Capture types and fixed-output geometry.
 
-pub use winrt_capture::CaptureSession;
+pub use winrt_capture::{CaptureOptions, CaptureSession};
 
 use nkcore::prelude::euclid::Size2D;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, D3D11_VIEWPORT};
