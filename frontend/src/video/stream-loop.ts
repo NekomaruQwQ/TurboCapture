@@ -1,93 +1,104 @@
-// Video stream loop.
-//
-// Receives `live-protocol` framed messages via WebSocket, decodes video frames,
-// and handles codec parameter updates.  Extracted from the React component so
-// the Svelte version of StreamRenderer only holds presentation logic.
-
-import { runReconnectingWS, wsMessages } from "../ws";
+import {
+  parseViewerBinaryMessage,
+  parseViewerControlMessage,
+  type RenderConfiguration,
+} from "../protocol";
+import { runReconnectingWebSocket, type MarkConnectionHealthy } from "../ws";
 import { H264Decoder } from "./decoder";
 
-// ── live-protocol constants ──────────────────────────────────────────────────
-
-/** Frame header size (bytes).  Matches the `live-protocol` Rust crate. */
-const HEADER_SIZE       = 8;
-const MSG_CODEC_PARAMS  = 0x01;
-const MSG_FRAME         = 0x02;
-const FLAG_IS_KEYFRAME  = 1 << 0;
-
-/**
- * Stream loop: receives `live-protocol` framed messages via WebSocket,
- * decodes video frames, and handles codec parameter updates.
- *
- * Runs until the AbortSignal fires (component unmount / streamId change).
- * Reconnects with exponential backoff on disconnect (handled by
- * `runReconnectingWS`).
- *
- * Each WS message is a complete `live-protocol` frame:
- * ```
- * [u8: message_type][u8: flags][u16: reserved][u32 LE: payload_length][payload]
- * ```
- *
- * Frame (0x02) payload: `[u64 LE: timestamp_us][avcc bytes]`
- * CodecParams (0x01): triggers decoder reinitialization (rare — encoder is persistent).
- */
-export async function startStreamLoop(
-    streamId: string,
-    onFrame: (frame: VideoFrame) => void,
-    signal: AbortSignal,
-): Promise<void> {
-    console.log("StreamLoop: Starting stream loop");
-
-    // Create the initial decoder.  fetchInit inside init() retries on 503
-    // and 404, so this blocks until the stream's encoder has produced its
-    // first IDR frame.
-    let decoder = new H264Decoder(streamId, onFrame);
-    try {
-        await decoder.init();
-    } catch (e) {
-        console.error("StreamLoop: Failed to initialize decoder:", e);
-        return;
-    }
-    if (signal.aborted) { decoder.close(); return; }
-
-    await runReconnectingWS(`/api/streams/${streamId}`, signal, async (ws) => {
-        for await (const data of wsMessages(ws, signal)) {
-            const buf = new Uint8Array(data);
-            if (buf.length < HEADER_SIZE) continue;
-
-            const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-            const msgType = view.getUint8(0);
-            const msgFlags = view.getUint8(1);
-
-            if (msgType === MSG_FRAME) {
-                // Frame payload: [u64 LE: timestamp_us][avcc bytes]
-                const timestamp = Number(view.getBigUint64(HEADER_SIZE, true));
-                const isKeyframe = (msgFlags & FLAG_IS_KEYFRAME) !== 0;
-                const avcc = buf.subarray(HEADER_SIZE + 8);
-                decoder.decodeFrame(timestamp, isKeyframe, avcc);
-            } else if (msgType === MSG_CODEC_PARAMS) {
-                // CodecParams: the encoder's SPS/PPS changed (rare — only on
-                // hot-swap in auto mode).  Reinitialize the decoder.
-                console.log("StreamLoop: CodecParams received, reinitializing decoder");
-                decoder.close();
-                decoder = new H264Decoder(streamId, onFrame);
-                while (!signal.aborted) {
-                    try {
-                        await decoder.init();
-                        break;
-                    } catch (e) {
-                        console.warn("StreamLoop: Reinit failed, retrying:", e);
-                        await sleep(1000);
-                    }
-                }
-            }
-        }
-    });
-
-    decoder.close();
-    console.log("StreamLoop: Stream loop ended");
+/** Rendering and lifecycle events emitted by the capture stream. */
+export interface StreamLoopCallbacks {
+  /** Receives ownership of a decoded frame, which the renderer must close. */
+  readonly onFrame: (frame: VideoFrame) => void;
+  /** Applies shader-only settings without disturbing transport or decoding. */
+  readonly onRenderConfiguration: (configuration: RenderConfiguration) => void;
+  /** Clears stale pixels while disconnected, reconfiguring, or awaiting a keyframe. */
+  readonly onWaiting: () => void;
 }
 
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+/** Runs the decoded-video stream until the route's abort signal is cancelled. */
+export async function startStreamLoop(
+  websocketUrl: string,
+  callbacks: StreamLoopCallbacks,
+  signal: AbortSignal,
+): Promise<void> {
+  callbacks.onWaiting();
+  await runReconnectingWebSocket(websocketUrl, signal, async (socket, markHealthy) => {
+    try {
+      await serveConnection(socket, callbacks, markHealthy);
+    } finally {
+      callbacks.onWaiting();
+    }
+  });
+}
+
+/** Owns the decoder and event handlers for exactly one WebSocket connection. */
+function serveConnection(
+  socket: WebSocket,
+  callbacks: StreamLoopCallbacks,
+  markHealthy: MarkConnectionHealthy,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      decoder.close();
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.onerror = null;
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+      if (error === undefined) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    };
+    const decoder = new H264Decoder((frame) => {
+      try {
+        callbacks.onFrame(frame);
+        markHealthy();
+      } catch (error) {
+        finish(asError(error));
+      }
+    }, (error) => finish(error));
+
+    socket.onmessage = (event: MessageEvent<unknown>): void => {
+      try {
+        if (typeof event.data === "string") {
+          const message = parseViewerControlMessage(event.data);
+          if (message.type === "error") {
+            finish(new Error(`Capture server ${message.code}: ${message.message}`));
+          } else {
+            callbacks.onRenderConfiguration(message.configuration);
+          }
+          return;
+        }
+        if (!(event.data instanceof ArrayBuffer)) {
+          throw new Error("Viewer WebSocket received an unsupported message payload.");
+        }
+
+        const message = parseViewerBinaryMessage(event.data);
+        if (message.kind === "codec") {
+          callbacks.onWaiting();
+          decoder.configure(message);
+        } else {
+          decoder.decode(message);
+        }
+      } catch (error) {
+        finish(asError(error));
+      }
+    };
+    socket.onclose = (): void => finish();
+    socket.onerror = (): void => finish(new Error("Viewer WebSocket encountered a network error."));
+  });
+}
+
+/** Converts arbitrary callback failures into errors suitable for reconnection logs. */
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }

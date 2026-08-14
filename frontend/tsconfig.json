@@ -1,19 +1,17 @@
 {
-    "extends": "@tsconfig/svelte/tsconfig.json",
-    "compilerOptions": {
-        "paths": {
-            "@/*": ["./src/*"],
-        },
-
-        "lib": ["ESNext", "DOM"],
-        "module": "ESNext",
-        "moduleResolution": "bundler",
-
-        "noEmit": true,
-        "skipLibCheck": true,
-        "noUnusedLocals": true,
-        "noUnusedParameters": true,
-        "noUncheckedIndexedAccess": true,
-        "noImplicitOverride": true
-    }
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["bun", "node", "vite/client"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  "include": ["index.ts", "vite.config.ts", "src/**/*.ts"]
 }

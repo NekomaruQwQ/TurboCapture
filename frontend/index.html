@@ -1,20 +1,13 @@
 <!doctype html>
 <html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Nekomaru LiveUI</title>
-        <link rel="stylesheet" href="global.tailwind.css" />
-        <link rel="stylesheet" href="global.css" />
-        <link rel="stylesheet" href="global.effects.css" />
-    </head>
-    <body>
-        <!-- The mount entrypoint clears #app's children before mounting Svelte. -->
-        <div id="app">
-            <div class="spinner-container">
-                <div class="spinner"></div>
-            </div>
-        </div>
-        <script type="module" src="index.ts"></script>
-    </body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TurboCapture Canvas</title>
+    <link rel="stylesheet" href="/global.css" />
+  </head>
+  <body>
+    <canvas id="canvas" aria-hidden="true"></canvas>
+    <script type="module" src="/index.ts"></script>
+  </body>
 </html>

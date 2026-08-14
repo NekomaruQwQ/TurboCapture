@@ -37,13 +37,13 @@ TurboCapture is always built and run from source. M0 does not require:
 - Cross-compilation or binaries for other machines.
 - A production static-file server for the viewer.
 
-All native components run on the livestreaming machine. A browser viewer may run on the same machine or another device on the trusted LAN. Runtime configuration may therefore use explicit executable paths, addresses, and ports that are meaningful only in this environment.
+All native components run on the livestreaming machine. The browser viewer always addresses its selected capture endpoint through `127.0.0.1` on the viewing machine. When capture runs on another machine, the operator port-forwards that native listener onto a local viewing-machine port. Runtime configuration may therefore use explicit executable paths, addresses, and ports that are meaningful only in this environment.
 
-## 3. Trusted Network
+## 3. Trusted Local Path
 
-The local machine and LAN are trusted. M0 has no authentication, authorization, TLS termination, user accounts, tenant isolation, secret management, or hostile-client hardening.
+The viewing machine and operator-managed port-forwarding path are trusted. M0 has no authentication, authorization, TLS termination, user accounts, tenant isolation, secret management, or hostile-client hardening.
 
-HTTP and WebSocket services should expose only the small surface needed by the utility, but they do not need security infrastructure designed for an untrusted network. Cross-origin access required by the independently hosted viewer should be allowed explicitly. Binding beyond the trusted LAN is an operator error, not a supported deployment mode.
+HTTP and WebSocket services should expose only the small surface needed by the utility, but they do not need security infrastructure designed for an untrusted network. Cross-origin access between the independently hosted viewer and its localhost capture port should be allowed explicitly. Direct browser access to a LAN capture address is unsupported; remote use goes through local port forwarding.
 
 ## 4. Clarity Before Generality
 
@@ -143,7 +143,7 @@ This boundary deliberately removes side-by-side color/alpha packing, dual-stream
 
 Each `capture-windows` instance serves its own REST status/configuration surface and video WebSocket. There is no relay, aggregation server, stdout media protocol, shared cross-process texture, or service-discovery layer in the media path.
 
-The control surface uses REST only. The viewer connects directly to the selected capture instance for video and render configuration. A configured address and port identify an instance; M0 does not require globally stable stream IDs or dynamic discovery.
+The control surface uses REST only. The viewer connects to the selected capture instance's localhost or locally forwarded port for video and render configuration. The hash route identifies that instance by port; M0 does not require arbitrary viewer hosts, globally stable stream IDs, or dynamic discovery.
 
 The protocol is private and versioned only as needed to keep the repository's native and browser code coherent. Backward compatibility across revisions is not a requirement.
 

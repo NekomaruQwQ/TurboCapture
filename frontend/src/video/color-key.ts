@@ -210,6 +210,7 @@ export class ColorKeyRenderer {
         this.uBinarizationColor = getUniform(gl, this.program, "u_binarizationColor")
 
         this.updateParams({ keyColors, kneeLow, kneeHigh, binarizationColor })
+        this.clear()
     }
 
     /**
@@ -244,7 +245,7 @@ export class ColorKeyRenderer {
             flat[i * 3 + 2] = srgbToLinear(b / 255)
         })
 
-        gl.uniform3fv(this.uKeyColorsL, flat)
+        if (flat.length > 0) gl.uniform3fv(this.uKeyColorsL, flat)
         gl.uniform1i(this.uKeyCount, keyColors.length)
         gl.uniform1f(this.uKneeLow, kneeLow)
         gl.uniform1f(this.uKneeHigh, kneeHigh)
@@ -263,28 +264,37 @@ export class ColorKeyRenderer {
     /** Render a decoded video frame with color-key applied. Closes the frame. */
     render(frame: VideoFrame): void {
         const gl = this.gl
+        try {
+            // Resize canvas + viewport when video dimensions change.
+            if (this.canvas.width !== frame.displayWidth || this.canvas.height !== frame.displayHeight) {
+                this.canvas.width = frame.displayWidth
+                this.canvas.height = frame.displayHeight
+                gl.viewport(0, 0, frame.displayWidth, frame.displayHeight)
+                console.log("ColorKeyRenderer: Resized to %dx%d", frame.displayWidth, frame.displayHeight)
+            }
 
-        // Resize canvas + viewport when video dimensions change.
-        if (this.canvas.width !== frame.displayWidth || this.canvas.height !== frame.displayHeight) {
-            this.canvas.width = frame.displayWidth
-            this.canvas.height = frame.displayHeight
-            gl.viewport(0, 0, frame.displayWidth, frame.displayHeight)
-            console.log("ColorKeyRenderer: Resized to %dx%d", frame.displayWidth, frame.displayHeight)
+            // Upload frame as texture.
+            gl.bindTexture(gl.TEXTURE_2D, this.texture)
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame)
+
+            // Draw fullscreen triangle after the upload has transferred frame ownership to GL.
+            gl.useProgram(this.program)
+            gl.bindVertexArray(this.vao)
+            gl.drawArrays(gl.TRIANGLES, 0, 3)
+        } finally {
+            // Decoder surfaces are scarce, so failures must release the frame too.
+            frame.close()
         }
-
-        // Upload frame as texture.
-        gl.bindTexture(gl.TEXTURE_2D, this.texture)
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame)
-
-        // Frame data is now on the GPU — release the VideoFrame immediately.
-        frame.close()
-
-        // Draw fullscreen triangle.
-        gl.useProgram(this.program)
-        gl.bindVertexArray(this.vao)
-        gl.drawArrays(gl.TRIANGLES, 0, 3)
     }
 
+    /** Clears decoded pixels to fully transparent while waiting or disconnected. */
+    clear(): void {
+        const gl = this.gl
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+    }
+
+    /** Releases the renderer's GPU resources when the page is discarded. */
     dispose(): void {
         const gl = this.gl
         gl.deleteTexture(this.texture)
@@ -344,13 +354,3 @@ function srgbToLinear(c: number): number {
     return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
 }
 
-/**
- * Parse a CSS hex color string (#RRGGBB) into an [R, G, B] tuple in [0,255].
- * Throws on invalid format.
- */
-export function parseHexColor(hex: string): [number, number, number] {
-    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex)
-    if (!m) throw new Error(`Invalid hex color: ${hex}`)
-    const [, r, g, b] = m as unknown as [string, string, string, string]
-    return [parseInt(r, 16), parseInt(g, 16), parseInt(b, 16)]
-}

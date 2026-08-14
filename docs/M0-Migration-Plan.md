@@ -27,8 +27,8 @@ The following are fixed inputs to this plan rather than open design questions:
 | Product scope | Personal livestream utility; public use is intentionally unsupported |
 | Target | Exactly the current Windows machine, GPU, encoder, drivers, and browser |
 | Delivery | Run from source; no packaging or distribution work |
-| Deployment | Native components share one machine; viewer may be on the trusted LAN |
-| Security | No authentication or TLS inside the trusted deployment |
+| Deployment | Viewer and capture endpoint are both localhost from the browser's perspective; remote capture is port-forwarded onto the viewing machine |
+| Security | No authentication or TLS on the loopback/port-forwarded viewer path |
 | Compatibility | No bridge or backward compatibility with the combined LiveUI runtime |
 | Stream ownership | One `capture-windows` process owns one stream and one active capture session |
 | Lifecycle | Process start creates a stream; process exit or kill stops it |
@@ -65,11 +65,11 @@ flowchart LR
     control -->|"spawn / kill"| instance_b
     control <-->|"REST only"| core_a
     control <-->|"REST only"| core_b
-    core_a -->|"video WebSocket + render config"| viewer
-    core_b -->|"video WebSocket + render config"| viewer
+    core_a -->|"local or port-forwarded WebSocket + render config"| viewer
+    core_b -->|"local or port-forwarded WebSocket + render config"| viewer
 ```
 
-There is no central server in the video path. A browser connects to the particular instance it wants to display. Multiple instances are identical except for their startup configuration, listen address, and selected target policy.
+There is no central server in the video path. A browser connects to the particular instance it wants to display through a localhost port; an instance on another machine is first port-forwarded onto that loopback interface. Multiple instances are identical except for their startup configuration, listen address, and selected target policy.
 
 ## 4. Repository Shape and Dependency Direction
 
@@ -280,8 +280,10 @@ A codec reinitialization sends new decoder configuration before the first keyfra
 
 ### 7.3 Network behavior
 
-- The listener address is explicit; LAN exposure is a conscious startup choice.
-- Cross-origin viewer access is allowed for the configured trusted workflow.
+- The native listener address is explicit and can remain loopback-only on its host.
+- The browser accepts only a capture port and always connects to `ws://127.0.0.1:<port>/api/video`.
+- A capture instance on another machine is exposed through operator-managed local port forwarding rather than direct browser LAN access.
+- Cross-origin access between the two localhost ports is allowed for the configured trusted workflow.
 - Viewer disconnect is ordinary and does not alter capture.
 - A lagging viewer is disconnected instead of creating unbounded buffers or blocking capture.
 - The viewer reconnects with a small bounded delay and starts again from fresh initialization plus an IDR.
@@ -291,7 +293,8 @@ A codec reinitialization sends new decoder configuration before the first keyfra
 
 The frontend is a small independently hosted viewer, not a control surface. It:
 
-- Receives a complete capture-instance endpoint through explicit configuration.
+- Receives a capture port through the exact `#/canvas?port=<port>` client-side route.
+- Derives the fixed `ws://127.0.0.1:<port>/api/video` endpoint without accepting an arbitrary host or protocol.
 - Connects to that instance's private video WebSocket.
 - Configures WebCodecs from the received codec data.
 - Uploads decoded opaque frames to WebGL.
@@ -415,7 +418,7 @@ Work:
 3. Apply render-configuration changes independently of decoder configuration.
 4. Remove audio, KPM, strings, widgets, tokens, marquees, Svelte control UI, and webview-specific integration.
 5. Provide a neutral/transparent visual state while waiting or reconnecting; keep diagnostics in developer logging.
-6. Verify same-machine, LAN, and intended LiveUI/OBS embedding paths using explicit endpoints.
+6. Verify same-machine and port-forwarded LiveUI/OBS embedding paths using explicit localhost ports.
 
 Visual gate on the actual livestreaming setup:
 
@@ -472,7 +475,7 @@ The following scenarios define M0 behavior on the target machine:
 | D3D or encoder fails unrecoverably | Instance exits non-zero; no elaborate internal recovery |
 | Two instances run | Each uses its own port, session, encoder, status, and failure boundary |
 | One instance is killed | Its stream stops; the other instance is unaffected |
-| Viewer is on trusted LAN | Explicit endpoint works with required cross-origin behavior |
+| Viewer uses a remote capture host | Port-forwarded capture port works through the same localhost iframe route without TLS |
 
 ## 11. M0 Completion Criteria
 
@@ -507,7 +510,7 @@ The following are intentionally deferred because they do not block the M0 captur
 ### Post-M0 product work
 
 - Packaging, installation, and public documentation.
-- Authentication or operation outside the trusted LAN.
+- Authentication or browser access outside the trusted loopback/port-forwarded path.
 - Other operating systems, GPUs, encoders, or browser fallbacks.
 - Stable external API/version compatibility.
 - Audio or other LiveUI-adjacent signals.

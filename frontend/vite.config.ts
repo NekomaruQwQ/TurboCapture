@@ -1,33 +1,23 @@
-import * as path from "node:path";
-import * as vite from "vite";
-import { svelte } from "@sveltejs/vite-plugin-svelte";
-import tailwindcss from "@tailwindcss/vite";
+import { defineConfig } from "vite";
 
-const vitePort = Number(process.env.LIVE_VITE_PORT);
-if (!vitePort) throw new Error("LIVE_VITE_PORT environment variable is not set");
+/** Returns the explicitly configured localhost development port. */
+function developmentPort(command: string): number | undefined {
+  if (command === "build") {
+    return undefined;
+  }
 
-export default vite.defineConfig({
-    root: __dirname,
-    plugins: [
-        svelte(),
-        tailwindcss(),
-    ],
-    resolve: {
-        alias: {
-            "@": path.resolve(__dirname, "src"),
-        },
-    },
-    server: {
-        port: vitePort,
+  const rawPort = process.env.LIVE_VITE_PORT;
+  const port = Number(rawPort);
+  if (rawPort === undefined || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("LIVE_VITE_PORT must be an integer from 1 through 65535.");
+  }
+  return port;
+}
 
-        // Allow any host to connect to the dev server.  This is necessary when running
-        // the frontend on another pc.
-        host: true,
-        allowedHosts: true,
-
-        // The browser loads the page from the core server (LIVE_PORT), not Vite.
-        // The core server proxies non-API requests to Vite for dev assets.
-        // HMR client must connect directly to Vite — no proxy needed for dev-only traffic.
-        hmr: { clientPort: vitePort },
-    },
-});
+export default defineConfig(({ command }) => ({
+  server: {
+    host: "127.0.0.1",
+    port: developmentPort(command),
+    strictPort: true,
+  },
+}));

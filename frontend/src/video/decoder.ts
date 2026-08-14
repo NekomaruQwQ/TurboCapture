@@ -1,150 +1,72 @@
-import { DEBUG } from "../../debug";
+import type { AccessUnit, CodecConfiguration } from "../protocol";
 
-// ── Init with retry ─────────────────────────────────────────────────────
+/** Maximum number of chunks allowed to wait inside WebCodecs. */
+export const MAX_DECODE_QUEUE_SIZE = 4;
 
-/// Codec init params returned by the server (pre-built for WebCodecs).
-interface CodecParams {
-    codec: string;
-    width: number;
-    height: number;
-    /// Base64-encoded AVCDecoderConfigurationRecord (avcC).
-    description: string;
+/** Signals that decoding cannot keep up and a clean reconnect is safer. */
+export class DecoderBacklogError extends Error {
+  constructor(queueSize: number) {
+    super(`WebCodecs decode queue reached ${queueSize} chunks.`);
+    this.name = "DecoderBacklogError";
+  }
 }
 
-/// Fetch codec initialization params, retrying on 503 and 404.
-///
-/// 503: the capture process is initializing (encoder hasn't produced its
-///      first IDR frame yet).
-/// 404: the stream doesn't exist yet — the server may create it shortly
-///      (e.g. the auto-selector hasn't picked a window yet).
-///
-/// Retries with exponential backoff (capped at 2s) for up to 30 attempts,
-/// giving the server plenty of time to create and initialize the stream.
-async function fetchInit(streamId: string): Promise<CodecParams> {
-    const maxRetries = 30;
-    const baseDelayMs = 250;
-
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        const res = await fetch(`/api/streams/${streamId}/init`);
-
-        if (res.ok) {
-            return await res.json() as CodecParams;
-        }
-
-        // Retriable: stream not yet created (404) or encoder still starting (503).
-        if (res.status === 404 || res.status === 503) {
-            const delay = baseDelayMs * Math.min(2 ** attempt, 8);
-            await new Promise((r) => setTimeout(r, delay));
-            continue;
-        }
-
-        throw new Error(`Failed to fetch codec params: ${res.status} ${res.statusText}`);
-    }
-
-    throw new Error("Timed out waiting for codec params");
-}
-
-// ── H.264 Decoder ───────────────────────────────────────────────────────
-
-/**
- * H.264 decoder using WebCodecs API.
- *
- * The server provides pre-built codec configuration (avcC descriptor +
- * codec string) and AVCC-formatted frame payloads, so this class has
- * zero H.264 format knowledge — it's a thin WebCodecs wrapper.
- */
+/** Thin generation-aware H.264/AVCC wrapper around the browser decoder. */
 export class H264Decoder {
-    private decoder: VideoDecoder | null = null;
-    private streamId: string;
-    private onFrame: (frame: VideoFrame) => void;
-    private isConfigured = false;
+  private readonly decoder: VideoDecoder;
+  private generation: number | null = null;
+  private waitingForKeyframe = true;
 
-    constructor(streamId: string, onFrame: (frame: VideoFrame) => void) {
-        this.streamId = streamId;
-        this.onFrame = onFrame;
+  /**
+   * Creates one decoder for a single WebSocket connection.
+   * Decoder errors are fatal because WebCodecs closes itself after reporting one.
+   */
+  constructor(onFrame: (frame: VideoFrame) => void, onError: (error: DOMException) => void) {
+    this.decoder = new VideoDecoder({ output: onFrame, error: onError });
+  }
+
+  /** Applies a newer codec generation and drops queued work from the old one. */
+  configure(configuration: CodecConfiguration): void {
+    if (this.generation !== null && configuration.generation <= this.generation) {
+      return;
+    }
+    if (this.decoder.state === "configured") {
+      this.decoder.reset();
+    }
+    this.decoder.configure(configuration.decoderConfig);
+    this.generation = configuration.generation;
+    this.waitingForKeyframe = true;
+  }
+
+  /**
+   * Decodes a matching access unit, ignoring stale generations and pre-key deltas.
+   * Throws when the bounded browser queue indicates that rendering has fallen behind.
+   */
+  decode(accessUnit: AccessUnit): void {
+    if (this.generation !== accessUnit.generation) {
+      return;
+    }
+    if (this.waitingForKeyframe && !accessUnit.keyframe) {
+      return;
+    }
+    if (this.decoder.decodeQueueSize >= MAX_DECODE_QUEUE_SIZE) {
+      throw new DecoderBacklogError(this.decoder.decodeQueueSize);
     }
 
-    /**
-     * Initialize the decoder by fetching codec configuration from the server.
-     */
-    async init() {
-        console.log("H264Decoder: Fetching init for stream %s", this.streamId);
-
-        const params = await fetchInit(this.streamId);
-        const avcC = base64ToUint8Array(params.description);
-
-        console.log("H264Decoder: Configuring decoder: %s, %dx%d, avcC=%d bytes",
-            params.codec, params.width, params.height, avcC.length);
-
-        this.decoder = new VideoDecoder({
-            output: (frame) => this.handleFrame(frame),
-            error: (e) => console.error("H264Decoder: Decoder error:", e),
-        });
-
-        this.decoder.configure({
-            codec: params.codec,
-            codedWidth: params.width,
-            codedHeight: params.height,
-            description: avcC,
-        });
-        this.isConfigured = true;
-
-        console.log("H264Decoder: Decoder initialized successfully");
+    this.decoder.decode(new EncodedVideoChunk({
+      type: accessUnit.keyframe ? "key" : "delta",
+      timestamp: accessUnit.timestampUs,
+      data: accessUnit.data,
+    }));
+    if (accessUnit.keyframe) {
+      this.waitingForKeyframe = false;
     }
+  }
 
-    /**
-     * Decode an AVCC frame payload from the server.
-     *
-     * The `avccData` is directly feedable to `EncodedVideoChunk` — no
-     * format conversion needed.
-     */
-    decodeFrame(timestamp: number, isKeyframe: boolean, avccData: Uint8Array) {
-        if (!this.decoder || !this.isConfigured) {
-            console.error("Decoder not initialized");
-            return;
-        }
-
-        if (DEBUG.debugStreamDecoder) {
-            console.log(
-                "H264Decoder: Decoding frame - timestamp: %d μs, keyframe: %s, size: %d bytes",
-                timestamp, isKeyframe, avccData.length);
-        }
-
-        this.decoder.decode(new EncodedVideoChunk({
-            type: isKeyframe ? "key" : "delta",
-            timestamp,
-            data: avccData,
-        }));
+  /** Releases codec resources and discards any queued frames. */
+  close(): void {
+    if (this.decoder.state !== "closed") {
+      this.decoder.close();
     }
-
-    private handleFrame(frame: VideoFrame) {
-        if (DEBUG.debugStreamDecoder) {
-            console.log(
-                "H264Decoder: Frame decoded! %s %dx%d, timestamp: %d μs",
-                frame.format,
-                frame.displayWidth,
-                frame.displayHeight,
-                frame.timestamp);
-        }
-        this.onFrame(frame);
-    }
-
-    close() {
-        if (this.decoder) {
-            this.decoder.close();
-            this.decoder = null;
-        }
-    }
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-
-function base64ToUint8Array(base64: string): Uint8Array {
-    const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes;
+  }
 }
