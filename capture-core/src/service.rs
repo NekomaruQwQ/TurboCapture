@@ -1,24 +1,26 @@
 //! Platform-neutral Axum service and bounded native-host channel boundary.
 
 use std::{
+    future::Future,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
     Json, Router,
     extract::{State, WebSocketUpgrade, rejection::JsonRejection},
     extract::ws::{Message, WebSocket},
-    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    http::{Method, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::get,
 };
 use base64::Engine as _;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     config::{
@@ -28,6 +30,9 @@ use crate::{
     status::{CaptureState, MediaStatus, RecoverableDiagnostic, TargetSummary},
     video::{CodecConfiguration, VideoEvent, encode_event},
 };
+
+/// Maximum time one viewer may hold the handler on a socket write.
+const VIEWER_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Capacities for every queued communication boundary owned by `capture-core`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +169,7 @@ impl InstanceService {
         });
 
         let cors = CorsLayer::new()
-            .allow_origin(HeaderValue::from_static("*"))
+            .allow_origin(Any)
             .allow_methods([Method::GET, Method::PUT])
             .allow_headers([CONTENT_TYPE]);
         Ok(Router::new()
@@ -519,19 +524,28 @@ async fn send_control(
     socket: &mut WebSocket,
     message: &ViewerControlMessage) -> Result<(), ()> {
     let serialized = serde_json::to_string(message).map_err(|_serialize_error| ())?;
-    socket
-        .send(Message::Text(serialized.into()))
-        .await
-        .map_err(|_socket_error| ())
+    complete_viewer_send(
+        socket.send(Message::Text(serialized.into())),
+        VIEWER_SEND_TIMEOUT).await
 }
 
 /// Serialize and send one checked binary video event.
 async fn send_video_event(socket: &mut WebSocket, event: &VideoEvent) -> Result<(), ()> {
     let encoded = encode_event(event).map_err(|_protocol_error| ())?;
-    socket
-        .send(Message::Binary(encoded.into()))
+    complete_viewer_send(
+        socket.send(Message::Binary(encoded.into())),
+        VIEWER_SEND_TIMEOUT).await
+}
+
+/// Bound one socket write so a stalled viewer cannot retain its handler forever.
+async fn complete_viewer_send<F, E>(send: F, deadline: Duration) -> Result<(), ()>
+where
+    F: Future<Output = Result<(), E>>,
+{
+    tokio::time::timeout(deadline, send)
         .await
-        .map_err(|_socket_error| ())
+        .map_err(|_elapsed| ())?
+        .map_err(|_send_error| ())
 }
 
 /// RAII viewer counter that cannot leak on an early handler return.
@@ -632,13 +646,20 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{net::SocketAddr, time::Duration};
 
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, header::CONTENT_TYPE},
+        http::{
+            Method, Request,
+            header::{
+                ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS,
+                ACCESS_CONTROL_REQUEST_METHOD, CONTENT_TYPE, ORIGIN,
+            },
+        },
     };
     use futures_util::StreamExt as _;
+    use tokio::task::JoinHandle;
     use tokio_tungstenite::{connect_async, tungstenite};
     use tower::ServiceExt as _;
 
@@ -741,6 +762,93 @@ mod tests {
         (router, host)
     }
 
+    /// Bind one router to an ephemeral loopback port for transport-level tests.
+    async fn spawn_test_server(router: Router) -> (SocketAddr, JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (address, server)
+    }
+
+    /// Wait until the dispatcher has published an initial decoder configuration.
+    async fn wait_for_decoder_cache(router: &Router) {
+        for _ in 0..10 {
+            let response = router
+                .clone()
+                .oneshot(Request::get("/api/initialization").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if !response_json(response).await["decoder"].is_null() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("decoder configuration did not reach the service cache");
+    }
+
+    /// Wait for the status snapshot to report an expected active viewer count.
+    async fn wait_for_viewer_count(router: &Router, expected: usize) {
+        for _ in 0..20 {
+            let response = router
+                .clone()
+                .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if response_json(response).await["viewer_count"] == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("viewer count did not reach {expected}");
+    }
+
+    /// Read until one access unit arrives, ignoring render and decoder setup.
+    async fn receive_access_unit(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> AccessUnit {
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let tungstenite::Message::Binary(data) = message
+                && let VideoMessage::AccessUnit(unit) = decode_message(&data).unwrap()
+            {
+                return unit;
+            }
+        }
+    }
+
+    /// Request and publish a distinct fresh keyframe for two viewer lifetimes.
+    async fn run_reconnecting_media(mut host: HostChannels) -> HostChannels {
+        for timestamp_us in [10, 20] {
+            assert_eq!(host.commands.recv().await, Some(MediaCommand::RequestKeyframe));
+            host.video
+                .send(VideoEvent::AccessUnit(test_access_unit(1, timestamp_us - 1, false)))
+                .await
+                .unwrap();
+            host.video
+                .send(VideoEvent::AccessUnit(test_access_unit(1, timestamp_us, true)))
+                .await
+                .unwrap();
+        }
+        host
+    }
+
+    /// Fetch one bound instance's configuration response through real HTTP.
+    async fn fetch_bound_config(address: SocketAddr) -> serde_json::Value {
+        let body = reqwest::get(format!("http://{address}/api/config"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        serde_json::from_str(&body).unwrap()
+    }
+
     /// Decode one response body as JSON for stable shape assertions.
     async fn response_json(response: Response) -> serde_json::Value {
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
@@ -818,6 +926,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_cross_origin_preflight_should_allow_configuration_updates() {
+        let (router, _host) = test_service();
+        let response = router
+            .oneshot(Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/api/config")
+                .header(ORIGIN, "http://viewer.test")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+                .header(ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.headers()[ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    }
+
+    #[tokio::test]
+    async fn viewer_send_should_time_out_when_transport_stalls() {
+        let stalled = std::future::pending::<Result<(), ()>>();
+        let result = complete_viewer_send(stalled, Duration::from_millis(1)).await;
+
+        assert_eq!(result, Err(()));
+    }
+
+    #[tokio::test]
     async fn restart_required_put_should_report_fields_and_retain_generation() {
         let (router, _host) = test_service();
         let mut candidate = test_config();
@@ -870,6 +1004,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn viewer_count_should_follow_connection_lifetime() {
+        let (router, _host) = test_service();
+        let status_router = router.clone();
+        let (address, server) = spawn_test_server(router).await;
+        let (mut socket, _) = connect_async(format!("ws://{address}/api/video"))
+            .await
+            .unwrap();
+
+        wait_for_viewer_count(&status_router, 1).await;
+        socket.close(None).await.unwrap();
+        wait_for_viewer_count(&status_router, 0).await;
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnecting_viewer_should_require_a_distinct_fresh_keyframe() {
+        let (router, host) = test_service();
+        host.video
+            .send(VideoEvent::CodecConfiguration(test_codec(1, 0xD9)))
+            .await
+            .unwrap();
+        wait_for_decoder_cache(&router).await;
+        let (address, server) = spawn_test_server(router).await;
+        let fake_media = tokio::spawn(run_reconnecting_media(host));
+
+        let (mut first_socket, _) = connect_async(format!("ws://{address}/api/video"))
+            .await
+            .unwrap();
+        let first = receive_access_unit(&mut first_socket).await;
+        first_socket.close(None).await.unwrap();
+
+        let (mut second_socket, _) = connect_async(format!("ws://{address}/api/video"))
+            .await
+            .unwrap();
+        let second = receive_access_unit(&mut second_socket).await;
+        second_socket.close(None).await.unwrap();
+
+        assert_eq!(
+            [(first.timestamp_us(), first.is_keyframe()),
+                (second.timestamp_us(), second.is_keyframe())],
+            [(10, true), (20, true)]);
+        let _host = fake_media.await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn bound_instances_should_serve_distinct_configuration() {
+        let (router_a, _host_a) = test_service();
+        let mut config_b = test_config();
+        config_b.selection.profiles[0].name = "terminal".to_owned();
+        config_b.selection.profiles[0].include = vec!["WindowsTerminal.exe".to_owned()];
+        let (mut service_b, _host_b) = InstanceService::new(
+            config_b.validate().unwrap(),
+            ChannelCapacities::default())
+            .unwrap();
+        let router_b = service_b.router().unwrap();
+        let (address_a, server_a) = spawn_test_server(router_a).await;
+        let (address_b, server_b) = spawn_test_server(router_b).await;
+
+        let config_a = fetch_bound_config(address_a).await;
+        let config_b = fetch_bound_config(address_b).await;
+
+        assert_eq!(
+            (&config_a["config"]["selection"]["profiles"][0]["name"],
+                &config_b["config"]["selection"]["profiles"][0]["name"]),
+            (&serde_json::json!("code"), &serde_json::json!("terminal")));
+        server_a.abort();
+        server_b.abort();
+    }
+
+    #[tokio::test]
+    async fn stopping_one_bound_instance_should_leave_the_other_available() {
+        let (router_a, _host_a) = test_service();
+        let (router_b, _host_b) = test_service();
+        let (_address_a, server_a) = spawn_test_server(router_a).await;
+        let (address_b, server_b) = spawn_test_server(router_b).await;
+
+        server_a.abort();
+        let config_b = fetch_bound_config(address_b).await;
+
+        assert_eq!(config_b["generation"], 1);
+        server_b.abort();
+    }
+
+    #[tokio::test]
     async fn fake_host_should_gate_late_viewer_and_codec_changes_on_fresh_idrs() {
         let (router, host) = test_service();
         host.video
@@ -877,26 +1097,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut cache_ready = false;
-        for _ in 0..10 {
-            let response = router
-                .clone()
-                .oneshot(Request::get("/api/initialization").body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            if !response_json(response).await["decoder"].is_null() {
-                cache_ready = true;
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(cache_ready);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
+        wait_for_decoder_cache(&router).await;
+        let (address, server) = spawn_test_server(router).await;
 
         let fake_media = tokio::spawn(run_fake_media(host));
 

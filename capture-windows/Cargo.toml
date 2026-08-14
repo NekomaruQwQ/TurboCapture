@@ -10,6 +10,7 @@ workspace = true
 capture-core = { path = "../capture-core" }
 
 anyhow = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
 env_logger = { workspace = true }
 enumerate-windows = { workspace = true }

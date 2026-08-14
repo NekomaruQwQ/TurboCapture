@@ -19,5 +19,6 @@ tower-http = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }
+reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true }

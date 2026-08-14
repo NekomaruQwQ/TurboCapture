@@ -274,6 +274,7 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -289,6 +290,7 @@ name = "capture-windows"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "capture-core",
  "clap",
  "enumerate-windows",

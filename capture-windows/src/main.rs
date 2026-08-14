@@ -7,7 +7,11 @@ mod h264;
 mod media;
 mod observation;
 
-use std::process::ExitCode;
+use std::{
+    future::IntoFuture as _,
+    net::SocketAddr,
+    process::ExitCode,
+};
 
 use anyhow::Context as _;
 use capture_core::{
@@ -51,13 +55,17 @@ fn run(args: CaptureArgs) -> anyhow::Result<()> {
     runtime.block_on(run_instance(args, config))
 }
 
-/// Run the Phase 2 host with its core dispatcher alive but listener unbound.
+/// Bind and serve one complete capture instance until its media owner exits.
 async fn run_instance(
     args: CaptureArgs,
     config: capture_core::ValidatedInstanceConfig) -> anyhow::Result<()> {
     let (mut service, channels) = InstanceService::new(config, ChannelCapacities::default())?;
-    let _router = service.router()?;
-    let completion = service.take_media_completion()
+    let address = SocketAddr::new(args.listen_address, args.port.get());
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("failed to bind private instance API to {address}"))?;
+    let router = service.router()?;
+    let mut completion = service.take_media_completion()
         .context("capture-core media completion receiver was already taken")?;
     let media_thread = media::spawn(
         media::MediaStartup {
@@ -65,17 +73,25 @@ async fn run_instance(
             encoder_name: args.encoder_name.clone(),
         },
         channels)?;
-    log::info!(
-        "Phase 2 instance is running headlessly; API endpoint {}:{} remains unbound until Phase 3",
-        args.listen_address,
-        args.port);
+    log::info!("capture instance API listening on http://{address}");
 
-    let completion = completion.await
-        .context("media thread exited without reporting terminal status")?;
-    media_thread.join()
-        .map_err(|_panic| anyhow::anyhow!("media thread panicked after completion"))?;
-    match completion {
-        MediaCompletion::Clean => Ok(()),
-        MediaCompletion::Fatal { message } => anyhow::bail!(message),
+    let server = axum::serve(listener, router).into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        biased;
+        completion = &mut completion => {
+            let completion = completion
+                .context("media thread exited without reporting terminal status")?;
+            media_thread.join()
+                .map_err(|_panic| anyhow::anyhow!("media thread panicked after completion"))?;
+            match completion {
+                MediaCompletion::Clean => Ok(()),
+                MediaCompletion::Fatal { message } => anyhow::bail!(message),
+            }
+        }
+        result = &mut server => {
+            result.context("capture instance API server failed")?;
+            anyhow::bail!("capture instance API server stopped unexpectedly")
+        }
     }
 }
