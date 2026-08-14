@@ -267,6 +267,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "capture-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "clap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "toml",
+ "tower",
+ "tower-http",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
