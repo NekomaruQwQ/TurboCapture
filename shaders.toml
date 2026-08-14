@@ -7,3 +7,13 @@ stage = "vertex"
 path = "live-capture/src/resample.hlsl"
 entry = "ps_main"
 stage = "pixel"
+
+[[compile]]
+path = "capture-windows/src/fixed_frame.hlsl"
+entry = "vs_main"
+stage = "vertex"
+
+[[compile]]
+path = "capture-windows/src/fixed_frame.hlsl"
+entry = "ps_main"
+stage = "pixel"

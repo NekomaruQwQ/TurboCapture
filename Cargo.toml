@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "capture-core",
+    "capture-windows",
     "live-app",
     "live-audio",
     "live-encoder",
