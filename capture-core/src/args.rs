@@ -53,7 +53,7 @@ impl FromStr for AdapterLuid {
 #[error("adapter LUID must be a non-zero decimal integer or 0x-prefixed hexadecimal integer")]
 pub struct ParseAdapterLuidError;
 
-/// Startup arguments consumed by the future `capture-windows` binary.
+/// Startup arguments consumed by the `capture-windows` binary.
 ///
 /// Listener and hardware identity are startup-only settings: changing any of
 /// them requires replacing the process instead of mutating a live instance.

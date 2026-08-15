@@ -1,6 +1,6 @@
 # TurboCapture M0 Migration Plan
 
-**Status:** Active and authoritative  
+**Status:** Complete and authoritative  
 **Principles:** [`M0-Principles.md`](M0-Principles.md)  
 **Replaces:** the pre-split `M5-Plan.md`, which mixed LiveUI and speculative TurboCapture designs
 
@@ -35,7 +35,7 @@ The following are fixed inputs to this plan rather than open design questions:
 | Native video | Opaque frames only; no encoded alpha or side-by-side color/alpha |
 | Transparency | Color keying and other transparency-producing work remain in WebGL/canvas |
 | Native API | `capture-core` supplies the platform-independent Axum implementation |
-| Control boundary | `capture-control` spawns/kills `capture-windows` and uses REST only |
+| Control boundary | Any future `capture-control` spawns/kills `capture-windows` and uses REST only |
 | Recovery | Expected target changes recover in-process; foundational media failures exit the process |
 | Operations | Explicit instance addresses and ports; no discovery or auto-restart in M0 |
 
@@ -79,7 +79,6 @@ The intended active source tree is:
 TurboCapture/
 ├── capture-core/       # platform-independent Rust library
 ├── capture-windows/    # Windows Rust binary
-├── capture-control/    # controlling binary; detailed plan deferred
 ├── frontend/           # minimal browser canvas viewer
 └── docs/
 ```
@@ -88,10 +87,10 @@ The required Rust dependency direction is:
 
 ```text
 capture-windows -> capture-core
-capture-control -REST-> running capture-windows instances
+(future capture-control) -REST-> running capture-windows instances
 ```
 
-`capture-core` must not depend on `capture-windows`. `capture-control` must not call media internals or obtain D3D resources. Sharing a narrowly scoped HTTP data-transfer type is acceptable if it reduces duplication, but the control surface must not acquire an in-process control path merely because both crates share a workspace.
+`capture-core` must not depend on `capture-windows`. M0 does not create a placeholder control crate. If `capture-control` is added later, it must not call media internals or obtain D3D resources. Sharing a narrowly scoped HTTP data-transfer type is acceptable if it reduces duplication, but the control surface must not acquire an in-process control path merely because both crates share a workspace.
 
 ### 4.1 `capture-core` ownership
 
@@ -243,12 +242,12 @@ Tests must cover:
 
 ## 7. Private Instance API and Video Contract
 
-Exact route spelling may be finalized during Phase 1, but the surface has four responsibilities and no more:
+The finalized surface has four routes and no more:
 
-1. Read the current status.
-2. Read and replace the live configuration.
-3. Provide any read-only initialization data useful to the viewer.
-4. Upgrade a viewer connection to the video WebSocket.
+1. `GET /api/status` reads current status.
+2. `GET /api/config` and `PUT /api/config` read and replace live configuration.
+3. `GET /api/initialization` provides read-only initialization data useful to the viewer.
+4. `GET /api/video` upgrades a viewer connection to the video WebSocket.
 
 The service is private and may change in lockstep with `capture-control` and the frontend. It should use ordinary HTTP status codes and structured JSON errors. No authentication handshake or stable public compatibility layer is required.
 

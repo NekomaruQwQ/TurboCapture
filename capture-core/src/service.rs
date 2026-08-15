@@ -70,7 +70,7 @@ pub enum MediaCompletion {
     },
 }
 
-/// Channel endpoints owned exclusively by the future platform host.
+/// Channel endpoints owned exclusively by the platform host.
 pub struct HostChannels {
     /// Latest accepted complete configuration; superseded values do not queue.
     pub configurations: watch::Receiver<ConfigSnapshot>,
@@ -725,7 +725,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Emulate the future native owner across initial and replacement codecs.
+    /// Emulate the native owner across initial and replacement codecs.
     async fn run_fake_media(mut host: HostChannels) -> HostChannels {
         assert_eq!(host.commands.recv().await, Some(MediaCommand::RequestKeyframe));
         host.video

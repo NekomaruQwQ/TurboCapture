@@ -18,6 +18,9 @@ use capture_core::{
     CaptureArgs, ChannelCapacities, InstanceService, MediaCompletion, load_config,
 };
 use clap::Parser as _;
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 
 /// Parse startup identity, run one instance, and preserve a non-zero fatal exit.
 fn main() -> ExitCode {
@@ -45,7 +48,7 @@ fn initialize_logging(filter: &str) -> anyhow::Result<()> {
 
 /// Establish DPI/config/service state before starting the native owner.
 fn run(args: CaptureArgs) -> anyhow::Result<()> {
-    set_dpi_awareness::per_monitor_v2()
+    enable_per_monitor_dpi_awareness()
         .context("failed to enable per-monitor-v2 DPI awareness")?;
     let config = load_config(&args.config)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -53,6 +56,12 @@ fn run(args: CaptureArgs) -> anyhow::Result<()> {
         .build()
         .context("failed to create capture-core runtime")?;
     runtime.block_on(run_instance(args, config))
+}
+
+/// Select physical-pixel Win32 geometry before observing or capturing windows.
+fn enable_per_monitor_dpi_awareness() -> windows::core::Result<()> {
+    // SAFETY: This runs once before the process calls any window or geometry API.
+    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
 }
 
 /// Bind and serve one complete capture instance until its media owner exits.

@@ -13,10 +13,8 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 env_logger = { workspace = true }
-enumerate-windows = { workspace = true }
 euclid = { workspace = true }
 log = { workspace = true }
-set-dpi-awareness = { workspace = true }
 tokio = { workspace = true }
 winrt-capture = { workspace = true }
 
@@ -27,12 +25,16 @@ windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     "Win32_System_Ole",
+    "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # `windows::core::implement` expands through this companion crate by name.
 windows-core = "0.62.2"

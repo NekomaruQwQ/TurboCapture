@@ -193,9 +193,11 @@ struct Resampler {
 
 impl Resampler {
     /// Compiled vertex shader produced by the repository shader recipe.
-    const VERTEX_BYTECODE: &'static [u8] = include_bytes!("fixed_frame_vs_main.fxo");
+    const VERTEX_BYTECODE: &'static [u8] = include_bytes!(concat!(
+        env!("OUT_DIR"), "/fixed_frame_vs_main.fxo"));
     /// Compiled pixel shader produced by the repository shader recipe.
-    const PIXEL_BYTECODE: &'static [u8] = include_bytes!("fixed_frame_ps_main.fxo");
+    const PIXEL_BYTECODE: &'static [u8] = include_bytes!(concat!(
+        env!("OUT_DIR"), "/fixed_frame_ps_main.fxo"));
 
     /// Create immutable pipeline objects on the fixed-frame device.
     fn new(device: &ID3D11Device) -> anyhow::Result<Self> {

@@ -1,33 +1,70 @@
-# Nekomaru LiveUI
+# TurboCapture
 
-Nekomaru's streaming infrastructure. **Portfolio demonstration only.**
+TurboCapture is a personal, source-run Windows capture service for livestream composition. One
+`capture-windows` process selects one window, keeps the frame path on the GPU through H.264
+encoding, and exposes that stream on a private localhost API. A small Chromium viewer decodes the
+opaque video with WebCodecs and produces transparency in WebGL.
 
-## Platform Baseline
+M0 deliberately targets one known Windows machine and browser stack. It is not packaged, portable,
+authenticated, TLS-enabled, or intended for an untrusted network.
 
-This project assumes the latest stable Windows 11 release, current GPU drivers,
-and a modern DirectX runtime and hardware feature level. Compatibility with
-older Windows releases, legacy drivers, or legacy GPU feature levels is out of
-scope. Some graphics paths deliberately use Direct3D 11 interfaces because they
-fit Windows Graphics Capture, shared textures, Media Foundation, and NVENC; that
-API choice is not a promise of DirectX 11-era platform compatibility.
+## Start one stream
 
-## ⚠️ WARNING
+Requirements: current Rust, Windows 11 and its SDK (`fxc.exe`), Bun, Nushell, `just`, a Chromium
+browser with WebCodecs/WebGL2, and the exact adapter/Media Foundation encoder names for the capture
+machine.
 
-**DO NOT build or run this project.**
+Create an ignored local configuration such as `data/minecraft.toml`:
 
-This software directly interfaces with low-level Windows APIs, DirectX 11 hardware pipelines, and GPU encoder firmware through unsafe native code. It performs raw memory-mapped I/O against your graphics hardware, spawns privileged child processes, and writes directly to system device buffers with no sandboxing.
+```toml
+[selection]
+prefer_foreground = true
 
-It is designed for **one specific hardware configuration** and has **no safety checks** for any other environment. Running it on your hardware may cause:
+[[selection.profiles]]
+name = "minecraft"
+include = ["javaw.exe"]
+exclude = []
 
-- Unrecoverable GPU driver crashes
-- Direct memory corruption via misconfigured DMA transfers
-- Firmware-level damage to your video encoder hardware
-- Cascading system instability leading to data loss
+[video]
+width = 1920
+height = 1080
+frame_rate = 60
+bit_rate = 12000000
 
-This is not a general-purpose tool. There are no build instructions and no support. **You have been warned.**
+[render.default]
+key_colors = [[0, 255, 0]]
+color_key_knee = { low = 0.02, high = 0.98 }
+```
 
-## License
+Then start the capture endpoint and viewer in separate terminals:
 
-GPLv3 — see [LICENSE](LICENSE).
+```console
+just capture --config data/minecraft.toml --listen-address 127.0.0.1 --port 48100 --adapter-luid 0x000000000000F477 --encoder-name "NVIDIA H.264 Encoder MFT"
+just viewer 4173
+```
 
-© Nekomaru
+Open `http://127.0.0.1:4173/#/canvas?port=48100`. The same URL can be used as an iframe or browser
+source; the `port` parameter belongs to the frontend route and selects
+`ws://127.0.0.1:48100/api/video`.
+
+For capture on another machine, forward its loopback endpoint onto the viewing machine first:
+
+```console
+ssh -N -L 48100:127.0.0.1:48100 capture-host
+```
+
+The browser still uses the localhost URL above, so M0 needs neither HTTPS nor a non-loopback viewer
+origin.
+
+## Development
+
+```console
+just build
+just test
+just clippy
+just frontend-check
+```
+
+See [the M0 operating and architecture guide](docs/README.md),
+[the governing principles](docs/M0-Principles.md), and
+[the migration plan](docs/M0-Migration-Plan.md) for the complete contract.
