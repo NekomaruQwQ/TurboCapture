@@ -1,13 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "capture-core",
-    "capture-windows",
+    "crates/capture-core",
+    "crates/capture-windows",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
 
 [workspace.dependencies.winrt-capture]
 git = "https://github.com/NekomaruQwQ/Nekomaru-Rust.git"
@@ -29,7 +31,7 @@ tokio = { version = "1.53.1", features = ["full"] }
 tokio-tungstenite = { version = "0.30.0", features = ["connect"] }
 toml = "1.1.4"
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.6.11", features = ["cors"] }
+tower-http = { version = "0.7.0", features = ["cors"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation"] }
 
 [workspace.dependencies.reqwest]
