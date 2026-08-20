@@ -183,7 +183,7 @@ The domains communicate through small, bounded channels:
 
 - **Configuration:** a latest-value channel carries only fully validated configuration snapshots. Superseded configurations need not queue.
 - **Media commands:** a bounded channel carries rare commands such as “force the next decodable keyframe.” It does not carry ordinary frame work.
-- **Status:** a latest-value channel publishes current target, capture state, frame counters/rates, and the latest diagnostic.
+- **Status:** a latest-value channel publishes current target, capture state, and frame counters/rates.
 - **Encoded output:** a bounded channel carries owned codec data and H.264 access units from the media thread to the async service.
 - **Termination:** a one-shot result reports clean or fatal media-thread completion to the process entry point.
 
@@ -263,7 +263,6 @@ Status should be diagnostic rather than orchestration-heavy. It should include o
 - Selected target summary without exposing a raw HWND as a durable identity.
 - Output dimensions and configured frame rate.
 - Capture/encode rate and viewer count.
-- Latest recoverable diagnostic, if any.
 
 Fatal failures are ultimately communicated by process exit and stderr. The control surface does not need a second failure protocol for a process that no longer exists.
 

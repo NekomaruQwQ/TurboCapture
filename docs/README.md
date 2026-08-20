@@ -179,7 +179,7 @@ Every capture process owns these routes on its fixed loopback address:
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/status` | Current generation, lifecycle state, target summary, rates, counters, viewers, and latest recoverable diagnostic |
+| `GET` | `/api/status` | Current generation, lifecycle state, target summary, rates, counters, and viewers |
 | `GET` | `/api/config` | Active canonical configuration and its generation |
 | `PUT` | `/api/config` | Validate and atomically replace one complete JSON configuration |
 | `GET` | `/api/initialization` | Current render settings and optional WebCodecs decoder initialization |

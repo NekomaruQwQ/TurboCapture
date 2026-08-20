@@ -26,15 +26,6 @@ pub struct TargetSummary {
     pub title: String,
 }
 
-/// Latest non-fatal media diagnostic retained for status inspection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecoverableDiagnostic {
-    /// Stable private code identifying the recoverable condition.
-    pub code: String,
-    /// Human-readable context for the operator.
-    pub message: String,
-}
-
 /// Latest-value status snapshot published by the native media thread.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaStatus {
@@ -50,8 +41,6 @@ pub struct MediaStatus {
     pub capture_rate: f64,
     /// Recent encode rate measured by the media owner.
     pub encode_rate: f64,
-    /// Most recent recoverable diagnostic, if any.
-    pub diagnostic: Option<RecoverableDiagnostic>,
 }
 
 impl Default for MediaStatus {
@@ -63,7 +52,6 @@ impl Default for MediaStatus {
             encoded_frames: 0,
             capture_rate: 0.0,
             encode_rate: 0.0,
-            diagnostic: None,
         }
     }
 }

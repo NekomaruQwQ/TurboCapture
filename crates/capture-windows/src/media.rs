@@ -8,8 +8,8 @@ use std::{
 use anyhow::{Context as _, ensure};
 use capture_core::{
     CaptureState, ConfigSnapshot, HostChannels, MediaCommand, MediaCompletion,
-    MediaStatus, ObservationId, RecoverableDiagnostic, SelectionDecision,
-    TargetSummary, VideoEvent, select_window,
+    MediaStatus, ObservationId, SelectionDecision, TargetSummary, VideoEvent,
+    select_window,
 };
 use euclid::default::Size2D;
 use tokio::sync::{mpsc, watch};
@@ -265,12 +265,12 @@ impl MediaOwner {
                 if let Some(current) = self.current_target.as_mut() {
                     current.summary = summary.clone();
                 }
-                self.status.transition(CaptureState::Capturing, Some(summary), None);
+                self.status.transition(CaptureState::Capturing, Some(summary));
             }
             OwnedDecision::Switch { id, profile } => {
                 let selected = find_observation(observations, id)?;
                 let summary = summary(selected, profile);
-                self.status.transition(CaptureState::Switching, Some(summary.clone()), None);
+                self.status.transition(CaptureState::Switching, Some(summary.clone()));
                 self.publish_status()?;
                 self.current_target = None;
                 self.last_source = None;
@@ -287,7 +287,7 @@ impl MediaOwner {
                             summary.executable_name,
                             summary.title);
                         self.current_target = Some(CurrentTarget { id, session, summary: summary.clone() });
-                        self.status.transition(CaptureState::Capturing, Some(summary), None);
+                        self.status.transition(CaptureState::Capturing, Some(summary));
                     }
                     Err(error) => {
                         let error = error.context("target disappeared while creating WGC session");
@@ -305,7 +305,7 @@ impl MediaOwner {
                 self.last_source = None;
                 self.force_transform = false;
                 self.fixed_frame.clear()?;
-                self.status.transition(CaptureState::Waiting, None, None);
+                self.status.transition(CaptureState::Waiting, None);
             }
         }
         self.publish_status()
@@ -352,21 +352,15 @@ impl MediaOwner {
     }
 
     /// Convert an ordinary target race into clear/waiting state and reselection.
-    fn recover_target(&mut self, code: &str, error: &anyhow::Error) -> anyhow::Result<()> {
-        log::warn!("recoverable media condition [{code}]: {error:#}");
+    fn recover_target(&mut self, condition: &str, error: &anyhow::Error) -> anyhow::Result<()> {
+        log::warn!("recoverable media condition [{condition}]: {error:#}");
         self.current_target = None;
         self.last_source = None;
         self.force_transform = false;
         self.fixed_frame.clear()?;
         self.force_observation = true;
         self.force_keyframe = true;
-        self.status.transition(
-            CaptureState::Waiting,
-            None,
-            Some(RecoverableDiagnostic {
-                code: code.to_owned(),
-                message: format!("{error:#}"),
-            }));
+        self.status.transition(CaptureState::Waiting, None);
         self.publish_status()
     }
 
@@ -509,14 +503,9 @@ impl StatusReporter {
     }
 
     /// Apply a visible lifecycle transition atomically to the next snapshot.
-    fn transition(
-        &mut self,
-        state: CaptureState,
-        target: Option<TargetSummary>,
-        diagnostic: Option<RecoverableDiagnostic>) {
+    fn transition(&mut self, state: CaptureState, target: Option<TargetSummary>) {
         self.snapshot.state = state;
         self.snapshot.target = target;
-        self.snapshot.diagnostic = diagnostic;
     }
 
     /// Count one newly captured WGC frame with checked lifetime arithmetic.

@@ -27,7 +27,7 @@ use crate::{
         ConfigError, ConfigSnapshot, InstanceConfig, RenderConfig,
         ValidatedInstanceConfig, ValidationIssue,
     },
-    status::{CaptureState, MediaStatus, RecoverableDiagnostic, TargetSummary},
+    status::{CaptureState, MediaStatus, TargetSummary},
     video::{CodecConfiguration, VideoEvent, encode_event},
 };
 
@@ -233,7 +233,6 @@ struct StatusResponse {
     capture_rate: f64,
     encode_rate: f64,
     viewer_count: usize,
-    diagnostic: Option<RecoverableDiagnostic>,
 }
 
 /// `GET /api/status` returns only values useful for diagnosing one live instance.
@@ -253,7 +252,6 @@ async fn get_status(State(state): State<Arc<ServiceState>>) -> Json<StatusRespon
         capture_rate: status.capture_rate,
         encode_rate: status.encode_rate,
         viewer_count: state.viewer_count.load(Ordering::Relaxed),
-        diagnostic: status.diagnostic,
     })
 }
 
@@ -871,7 +869,6 @@ mod tests {
             encoded_frames: 9,
             capture_rate: 60.0,
             encode_rate: 59.5,
-            diagnostic: None,
         });
 
         let response = router
@@ -883,6 +880,18 @@ mod tests {
         assert_eq!(body["configuration_generation"], 1);
         assert_eq!(body["state"], "capturing");
         assert_eq!(body["target"]["profile"], "code");
+    }
+
+    #[tokio::test]
+    async fn status_should_not_include_transient_media_diagnostics() {
+        let (router, _host) = test_service();
+        let response = router
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+
+        assert!(body.get("diagnostic").is_none());
     }
 
     #[tokio::test]

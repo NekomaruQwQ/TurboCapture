@@ -27,7 +27,7 @@ pub use service::{
     ChannelCapacities, HostChannels, InstanceService, MediaCommand,
     MediaCompletion, ServiceError,
 };
-pub use status::{CaptureState, MediaStatus, RecoverableDiagnostic, TargetSummary};
+pub use status::{CaptureState, MediaStatus, TargetSummary};
 pub use video::{
     AccessUnit, CodecConfiguration, VideoEvent, VideoMessage, VideoProtocolError,
     decode_message, encode_event, serialize_avcc,
