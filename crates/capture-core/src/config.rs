@@ -2,17 +2,13 @@
 
 use std::{
     collections::BTreeMap,
-    fs::File,
-    io::Read as _,
+    fs,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::selector::{SelectorPolicy, validate_selection};
-
-/// Maximum accepted size of an initial TOML configuration document.
-const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 /// Maximum number of simultaneous key colors supported by the browser shader.
 pub const MAX_RENDER_KEYS: usize = 8;
@@ -271,14 +267,6 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
-    /// The bounded configuration document exceeded the accepted limit.
-    #[error("configuration {path} exceeds the {limit} byte limit")]
-    TooLarge {
-        /// Oversized document path.
-        path: PathBuf,
-        /// Maximum permitted byte count.
-        limit: usize,
-    },
     /// The initial configuration document was not UTF-8.
     #[error("configuration {path} is not UTF-8: {source}")]
     InvalidUtf8 {
@@ -312,30 +300,17 @@ pub enum ConfigError {
     GenerationExhausted,
 }
 
-/// Loads and validates a bounded UTF-8 TOML configuration document.
+/// Loads and validates a UTF-8 TOML configuration document.
 ///
 /// # Errors
 ///
-/// Returns [`ConfigError`] for filesystem, size, UTF-8, TOML, or semantic
-/// validation failures. No usable partial configuration is returned.
+/// Returns [`ConfigError`] for filesystem, UTF-8, TOML, or semantic validation
+/// failures. No usable partial configuration is returned.
 pub fn load_config(path: &Path) -> Result<ValidatedInstanceConfig, ConfigError> {
-    let file = File::open(path).map_err(|source| ConfigError::Io {
+    let bytes = fs::read(path).map_err(|source| ConfigError::Io {
         path: path.to_owned(),
         source,
     })?;
-    let mut bytes = Vec::new();
-    file.take(MAX_CONFIG_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| ConfigError::Io {
-            path: path.to_owned(),
-            source,
-        })?;
-    if bytes.len() > MAX_CONFIG_BYTES {
-        return Err(ConfigError::TooLarge {
-            path: path.to_owned(),
-            limit: MAX_CONFIG_BYTES,
-        });
-    }
     let document = String::from_utf8(bytes)
         .map_err(|source| ConfigError::InvalidUtf8 { path: path.to_owned(), source })?;
     let config = toml::from_str::<InstanceConfig>(&document)
