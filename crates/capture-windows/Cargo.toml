@@ -12,9 +12,9 @@ capture-core = { path = "../capture-core" }
 anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
-env_logger = { workspace = true }
 euclid = { workspace = true }
 log = { workspace = true }
+pretty_env_logger = { workspace = true }
 tokio = { workspace = true }
 winrt-capture = { workspace = true }
 

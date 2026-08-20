@@ -7,9 +7,9 @@ use std::{
 
 use anyhow::{Context as _, ensure};
 use capture_core::{
-    AdapterLuid, CaptureState, ConfigSnapshot, HostChannels, MediaCommand,
-    MediaCompletion, MediaStatus, ObservationId, RecoverableDiagnostic,
-    SelectionDecision, TargetSummary, VideoEvent, select_window,
+    CaptureState, ConfigSnapshot, HostChannels, MediaCommand, MediaCompletion,
+    MediaStatus, ObservationId, RecoverableDiagnostic, SelectionDecision,
+    TargetSummary, VideoEvent, select_window,
 };
 use euclid::default::Size2D;
 use tokio::sync::{mpsc, watch};
@@ -37,8 +37,6 @@ use crate::{
 /// Fixed startup identity not replaceable through the configuration channel.
 #[derive(Debug, Clone)]
 pub struct MediaStartup {
-    /// Exact DXGI adapter required by this process generation.
-    pub adapter_luid: AdapterLuid,
     /// Exact adapter-filtered H.264 MFT friendly name.
     pub encoder_name: String,
 }
@@ -82,7 +80,7 @@ struct MediaChannels {
 fn run_owner(startup: &MediaStartup, channels: MediaChannels) -> anyhow::Result<()> {
     let _com = ComApartment::initialize()?;
     let _media_foundation = MediaFoundation::start()?;
-    let device = device::create_and_validate(startup.adapter_luid)?;
+    let device = device::create_and_validate()?;
     let initial = channels.configurations.borrow().clone();
     let video_config = &initial.config.config().video;
     let output_size = Size2D::new(video_config.width, video_config.height);
@@ -93,7 +91,7 @@ fn run_owner(startup: &MediaStartup, channels: MediaChannels) -> anyhow::Result<
     let release_tracker = SurfaceReleaseTracker::new(pool.surface_count());
     let encoder = H264Encoder::new(
         &device.device,
-        startup.adapter_luid,
+        device.adapter_luid,
         &startup.encoder_name,
         video_config)
         .context("failed to initialize exact H.264 encoder")?;

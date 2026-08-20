@@ -1,5 +1,6 @@
 //! One-process Windows capture and H.264 host for TurboCapture M0.
 
+mod args;
 mod device;
 mod encoder;
 mod frame;
@@ -9,24 +10,26 @@ mod observation;
 
 use std::{
     future::IntoFuture as _,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     process::ExitCode,
 };
 
 use anyhow::Context as _;
 use capture_core::{
-    CaptureArgs, ChannelCapacities, InstanceService, MediaCompletion, load_config,
+    ChannelCapacities, InstanceService, MediaCompletion, load_config,
 };
 use clap::Parser as _;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 
+use crate::args::CaptureArgs;
+
 /// Parse startup identity, run one instance, and preserve a non-zero fatal exit.
 fn main() -> ExitCode {
     let args = CaptureArgs::parse();
-    if let Err(error) = initialize_logging(&args.log_filter) {
-        eprintln!("fatal: {error:#}");
+    if let Err(error) = pretty_env_logger::try_init() {
+        eprintln!("fatal: failed to initialize logging: {error}");
         return ExitCode::FAILURE;
     }
     match run(args) {
@@ -36,14 +39,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Initialize process-global logging from the shared CLI filter.
-fn initialize_logging(filter: &str) -> anyhow::Result<()> {
-    env_logger::Builder::new()
-        .parse_filters(filter)
-        .try_init()
-        .context("failed to initialize logging")
 }
 
 /// Establish DPI/config/service state before starting the native owner.
@@ -69,7 +64,7 @@ async fn run_instance(
     args: CaptureArgs,
     config: capture_core::ValidatedInstanceConfig) -> anyhow::Result<()> {
     let (mut service, channels) = InstanceService::new(config, ChannelCapacities::default())?;
-    let address = SocketAddr::new(args.listen_address, args.port.get());
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, args.port.get()));
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind private instance API to {address}"))?;
@@ -78,7 +73,6 @@ async fn run_instance(
         .context("capture-core media completion receiver was already taken")?;
     let media_thread = media::spawn(
         media::MediaStartup {
-            adapter_luid: args.adapter_luid,
             encoder_name: args.encoder_name.clone(),
         },
         channels)?;

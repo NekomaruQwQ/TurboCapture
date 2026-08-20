@@ -1,4 +1,4 @@
-//! Exact-adapter asynchronous Media Foundation H.264 encoder.
+//! Selected-adapter asynchronous Media Foundation H.264 encoder.
 
 #![expect(
     non_upper_case_globals,
@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context as _, ensure};
-use capture_core::{AdapterLuid, VideoConfig};
+use capture_core::VideoConfig;
 use windows::{
     Win32::{
         Foundation::E_NOTIMPL,
@@ -74,7 +74,7 @@ impl H264Encoder {
     #[expect(clippy::multiple_unsafe_ops_per_block, reason = "ordered MF media-type transactions")]
     pub fn new(
         device: &ID3D11Device,
-        adapter_luid: AdapterLuid,
+        adapter_luid: u64,
         encoder_name: &str,
         config: &VideoConfig) -> anyhow::Result<Self> {
         let transform = activate_exact_encoder(adapter_luid, encoder_name)?;
@@ -293,9 +293,9 @@ impl IMFAsyncCallback_Impl for SurfaceReleaseCallback_Impl {
     }
 }
 
-/// Enumerate hardware encoders filtered to the exact adapter and friendly name.
+/// Enumerate hardware encoders filtered to the selected adapter and friendly name.
 fn activate_exact_encoder(
-    adapter_luid: AdapterLuid,
+    adapter_luid: u64,
     encoder_name: &str) -> anyhow::Result<IMFTransform> {
     let mut attributes = None;
     // SAFETY: The output option is initialized and one slot is sufficient.
@@ -304,8 +304,8 @@ fn activate_exact_encoder(
     let attributes = attributes.context("MF returned null enumeration attributes")?;
     // MFT_ENUM_ADAPTER_LUID consumes the Win32 LUID's exact eight-byte layout.
     // SAFETY: The attribute copies the provided bytes before returning.
-    unsafe { attributes.SetBlob(&MFT_ENUM_ADAPTER_LUID, &adapter_luid.get().to_le_bytes()) }
-        .context("failed to restrict encoder enumeration to the configured adapter")?;
+    unsafe { attributes.SetBlob(&MFT_ENUM_ADAPTER_LUID, &adapter_luid.to_le_bytes()) }
+        .context("failed to restrict encoder enumeration to the selected adapter")?;
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -326,9 +326,9 @@ fn activate_exact_encoder(
             &attributes,
             &raw mut raw,
             &raw mut count)
-    }.context("failed to enumerate H.264 encoders on the configured adapter")?;
+    }.context("failed to enumerate H.264 encoders on the selected adapter")?;
     let activations = ActivationArray { raw, count: count as usize };
-    ensure!(!activations.is_empty(), "configured adapter exposes no async hardware H.264 encoder");
+    ensure!(!activations.is_empty(), "selected adapter exposes no async hardware H.264 encoder");
 
     let mut names = Vec::new();
     for activation in activations.iter() {
@@ -342,7 +342,7 @@ fn activate_exact_encoder(
         }
     }
     anyhow::bail!(
-        "encoder '{encoder_name}' is unavailable on adapter {adapter_luid}; available: {}",
+        "encoder '{encoder_name}' is unavailable on adapter 0x{adapter_luid:016X}; available: {}",
         names.join(", "))
 }
 

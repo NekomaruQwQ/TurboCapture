@@ -46,7 +46,7 @@ or implement a placeholder crate for it.
 M0 intentionally assumes:
 
 - Windows 11 on the current livestreaming machine.
-- The explicitly named DXGI adapter and adapter-filtered H.264 Media Foundation transform.
+- The default DXGI hardware adapter and an explicitly named adapter-filtered H.264 transform.
 - Windows Graphics Capture, D3D11 video processing, NV12 surfaces, and the Windows SDK `fxc.exe`.
 - A current Rust toolchain and Cargo.
 - Bun for the frontend; Nushell and `just` for the repository recipes.
@@ -65,14 +65,13 @@ usable. This is a complete example:
 ```toml
 [selection]
 prefer_foreground = true
+enabled = ["minecraft", "fallback-game"]
 
-[[selection.profiles]]
-name = "minecraft"
+[selection.profiles.minecraft]
 include = ["javaw.exe"]
 exclude = ["launcher"]
 
-[[selection.profiles]]
-name = "fallback-game"
+[selection.profiles.fallback-game]
 include = ["game.exe"]
 exclude = []
 
@@ -98,16 +97,18 @@ color_key_knee = { low = 0.01, high = 0.20 }
 binarization_color = [255, 255, 255]
 ```
 
-Selection profile order is priority order. Include and exclude rules are case-insensitive executable
-path substrings; excludes veto candidates globally. A still-valid current target remains sticky, with
-the foreground preference used when choosing among otherwise eligible candidates.
+`selection.enabled` lists active profiles in priority order. Definitions may remain in
+`selection.profiles` while disabled. Include and exclude rules are case-insensitive executable-path
+substrings; excludes from enabled profiles veto candidates globally. A still-valid current target
+remains sticky, with the foreground preference used when choosing among otherwise eligible candidates.
 
 `source.crop` is optional and uses inclusive minimum/exclusive maximum captured-texture coordinates.
 The native pipeline clamps it to the live texture and aspect-fits it into the fixed opaque output,
 clearing unused pixels. Video width and height must be non-zero, even, and representable as `u16`.
 
-`render.default` is used while no profile override applies. Each `render.profiles` key must name an
-enabled selection profile. Up to eight sRGB key colors are supported. The knee must satisfy
+`render.default` is used while no profile override applies. Each `render.profiles` key must name a
+defined selection profile, which may currently be disabled. Up to eight sRGB key colors are supported.
+The knee must satisfy
 `0 <= low < high <= 1`; `binarization_color` optionally replaces foreground RGB while retaining the
 computed alpha.
 
@@ -119,15 +120,17 @@ Build everything once:
 just build
 ```
 
-Start one process with explicit startup identity:
+Start one process with explicit port and encoder identity:
 
 ```console
-just capture --config data/minecraft.toml --listen-address 127.0.0.1 --port 48100 --adapter-luid 0x000000000000F477 --encoder-name "NVIDIA H.264 Encoder MFT" --log-filter info
+$env.RUST_LOG = "info"
+just capture --config data/minecraft.toml --port 48100 --encoder-name "NVIDIA H.264 Encoder MFT"
 ```
 
-`--config`, `--listen-address`, `--port`, `--adapter-luid`, and `--encoder-name` are required. The LUID
-accepts a non-zero decimal value or `0x`-prefixed hexadecimal value. Listener/hardware/video settings
-are process-generation settings: stop and replace the process to change them.
+`--config`, `--port`, and `--encoder-name` are required. The process binds `127.0.0.1`, creates its
+D3D11 device on the default hardware adapter, and filters encoder discovery using that device's LUID.
+Port, encoder, and video settings are process-generation settings: stop and replace the process to
+change them. Logging is configured exclusively through `RUST_LOG`.
 
 Start the viewer on its own local port:
 
@@ -172,7 +175,7 @@ remote instances. Do not expose the private unauthenticated API to an untrusted 
 
 ## Private instance API
 
-Every capture process owns these routes on its explicit address:
+Every capture process owns these routes on its fixed loopback address:
 
 | Method | Route | Purpose |
 | --- | --- | --- |
@@ -204,10 +207,10 @@ The meaningful live states are `waiting`, `switching`, and `capturing`. No eligi
 closure, viewer disconnect, and live configuration rejection are recoverable. Status remains available
 while the process waits for a matching window.
 
-An unavailable/mismatched adapter or encoder, unsupported graphics capability, bind failure,
-unrecoverable D3D/WGC/Media Foundation failure, or internal invariant violation is fatal and returns a
-non-zero process exit. M0 intentionally delegates process restart to the operator or a future control
-surface.
+An unavailable or incompatible default adapter or encoder, unsupported graphics capability, bind
+failure, unrecoverable D3D/WGC/Media Foundation failure, or internal invariant violation is fatal and
+returns a non-zero process exit. M0 intentionally delegates process restart to the operator or a
+future control surface.
 
 Stopping the process stops the stream. Starting multiple processes on distinct ports creates multiple
 independent streams; no discovery or shared lifecycle is involved.

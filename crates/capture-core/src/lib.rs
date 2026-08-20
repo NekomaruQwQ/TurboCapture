@@ -7,14 +7,12 @@
 
 #![deny(missing_docs)]
 
-pub mod args;
 pub mod config;
 pub mod selector;
 pub mod service;
 pub mod status;
 pub mod video;
 
-pub use args::{AdapterLuid, CaptureArgs, ParseAdapterLuidError};
 pub use config::{
     ColorKeyKnee, ConfigError, ConfigSnapshot, CropRect, InstanceConfig,
     RenderConfig, RenderProfiles, RgbColor, SelectionConfig,

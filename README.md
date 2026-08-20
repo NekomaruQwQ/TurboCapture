@@ -11,17 +11,16 @@ authenticated, TLS-enabled, or intended for an untrusted network.
 ## Start one stream
 
 Requirements: current Rust, Windows 11 and its SDK (`fxc.exe`), Bun, Nushell, `just`, a Chromium
-browser with WebCodecs/WebGL2, and the exact adapter/Media Foundation encoder names for the capture
-machine.
+browser with WebCodecs/WebGL2, and the exact Media Foundation encoder name for the capture machine.
 
 Create an ignored local configuration such as `data/minecraft.toml`:
 
 ```toml
 [selection]
 prefer_foreground = true
+enabled = ["minecraft"]
 
-[[selection.profiles]]
-name = "minecraft"
+[selection.profiles.minecraft]
 include = ["javaw.exe"]
 exclude = []
 
@@ -39,9 +38,13 @@ color_key_knee = { low = 0.02, high = 0.98 }
 Then start the capture endpoint and viewer in separate terminals:
 
 ```console
-just capture --config data/minecraft.toml --listen-address 127.0.0.1 --port 48100 --adapter-luid 0x000000000000F477 --encoder-name "NVIDIA H.264 Encoder MFT"
+$env.RUST_LOG = "info"
+just capture --config data/minecraft.toml --port 48100 --encoder-name "NVIDIA H.264 Encoder MFT"
 just viewer 4173
 ```
+
+The process creates a device on the default hardware adapter, restricts encoder discovery to that
+adapter, and binds its private API to `127.0.0.1` automatically.
 
 Open `http://127.0.0.1:4173/#/canvas?port=48100`. The same URL can be used as an iframe or browser
 source; the `port` parameter belongs to the frontend route and selects

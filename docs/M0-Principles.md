@@ -37,7 +37,7 @@ TurboCapture is always built and run from source. M0 does not require:
 - Cross-compilation or binaries for other machines.
 - A production static-file server for the viewer.
 
-All native components run on the livestreaming machine. The browser viewer always addresses its selected capture endpoint through `127.0.0.1` on the viewing machine. When capture runs on another machine, the operator port-forwards that native listener onto a local viewing-machine port. Runtime configuration may therefore use explicit executable paths, addresses, and ports that are meaningful only in this environment.
+All native components run on the livestreaming machine. The browser viewer always addresses its selected capture endpoint through `127.0.0.1` on the viewing machine. When capture runs on another machine, the operator port-forwards that native listener onto a local viewing-machine port. Runtime configuration may therefore use explicit executable paths and ports that are meaningful only in this environment.
 
 ## 3. Trusted Local Path
 
@@ -102,7 +102,6 @@ There is no internal stopped mode and no multi-stream native manager inside `cap
 - Pure auto-selector policy over already-observed window facts.
 - Private HTTP, WebSocket, status, and video message types.
 - The platform-independent Axum router and handlers.
-- The Clap argument definitions used by `capture-windows`.
 
 It must not enumerate windows, call Win32, own D3D or Media Foundation objects, or spawn capture processes. Its policy and API behavior must be testable without a desktop or GPU.
 
@@ -115,8 +114,10 @@ It must not enumerate windows, call Win32, own D3D or Media Foundation objects, 
 - D3D11 device selection and GPU resources.
 - Crop, resample, color-format conversion, and opaque H.264 encoding.
 - Hosting a `capture-core` Axum service for its one stream.
+- Its process-local Clap argument definition and fixed loopback listener.
 
-It uses the CLI definition from `capture-core`; it does not maintain a second argument model.
+Its CLI contains only process-generation inputs used by this binary. Platform-neutral live
+configuration remains owned and validated by `capture-core`.
 
 ### `capture-control` binary
 
@@ -153,7 +154,7 @@ Configuration updates are complete replacements, not partially applied patches. 
 
 Settings fall into two categories:
 
-- Startup settings, such as listen address, port, and hardware adapter identity, take effect by restarting the process.
+- Startup settings, such as port and encoder identity, take effect by restarting the process.
 - Live settings, such as selection rules, crop, output geometry where supported, and browser render parameters, may be replaced while the process runs.
 
 M0 distinguishes expected runtime conditions from broken invariants:

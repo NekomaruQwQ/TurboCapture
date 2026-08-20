@@ -69,7 +69,7 @@ flowchart LR
     core_b -->|"local or port-forwarded WebSocket + render config"| viewer
 ```
 
-There is no central server in the video path. A browser connects to the particular instance it wants to display through a localhost port; an instance on another machine is first port-forwarded onto that loopback interface. Multiple instances are identical except for their startup configuration, listen address, and selected target policy.
+There is no central server in the video path. A browser connects to the particular instance it wants to display through a localhost port; an instance on another machine is first port-forwarded onto that loopback interface. Multiple instances are identical except for their startup configuration, port, and selected target policy.
 
 ## 4. Repository Shape and Dependency Direction
 
@@ -104,7 +104,6 @@ capture-windows -> capture-core
 - Browser render-configuration data.
 - Video subscriber fan-out and decoder-start synchronization.
 - The Axum router, REST handlers, and video WebSocket handler.
-- The single Clap argument model consumed by `capture-windows`.
 - Narrow channel-facing interfaces through which a platform host supplies media status and encoded packets.
 
 It does not own:
@@ -121,7 +120,8 @@ Configuration and selector code should expose concrete types and functions first
 
 `capture-windows` is a thin process entry point around one Windows media owner. It owns:
 
-- Startup validation of the exact adapter, encoder, OS, and required device features.
+- The process-local Clap argument model and fixed IPv4 loopback listener.
+- Startup validation of the default adapter, exact encoder, OS, and required device features.
 - Window enumeration and conversion into `capture-core` observation records.
 - Selector polling and translation of a selected record into a capture target.
 - WGC creation, closure handling, and target replacement.
@@ -206,14 +206,15 @@ These names describe status, not a generalized state-machine framework. Target c
 
 ### 6.1 Startup configuration
 
-The `capture-core` Clap definition should cover at least:
+The `capture-windows` Clap definition covers only process-generation inputs:
 
 - Path to an initial configuration file.
-- Listen address and port.
-- Required adapter/device identity when it is not a fixed documented constant.
-- Logging verbosity or equivalent diagnostics switch.
+- Non-zero loopback port.
+- Exact Media Foundation encoder name.
 
-The process loads and validates its initial configuration before exposing a usable service. Listen address, port, adapter selection, and other resource-construction settings require process restart to change.
+The process loads and validates its initial configuration before exposing a usable service. It always
+binds IPv4 loopback and creates a device on the default hardware adapter. Port, encoder, and other
+resource-construction settings require process restart to change. Logging is controlled by `RUST_LOG`.
 
 ### 6.2 Live replacement
 
@@ -225,7 +226,9 @@ The REST surface uses complete replacement semantics:
 - A valid candidate atomically becomes the next generation.
 - An invalid candidate returns a structured client error and does not mutate the active generation.
 
-Policy rules and browser render parameters are expected to update live. A change requiring device, output media type, listener, or encoder reconstruction may be rejected as restart-required in M0 rather than hidden behind a complicated live transition.
+Policy rules and browser render parameters are expected to update live. A change requiring device,
+output media type, port, or encoder reconstruction may be rejected as restart-required in M0 rather
+than hidden behind a complicated live transition.
 
 ### 6.3 Selection inputs and purity
 
@@ -279,7 +282,7 @@ A codec reinitialization sends new decoder configuration before the first keyfra
 
 ### 7.3 Network behavior
 
-- The native listener address is explicit and can remain loopback-only on its host.
+- The native listener is fixed to IPv4 loopback on its host.
 - The browser accepts only a capture port and always connects to `ws://127.0.0.1:<port>/api/video`.
 - A capture instance on another machine is exposed through operator-managed local port forwarding rather than direct browser LAN access.
 - Cross-origin access between the two localhost ports is allowed for the configured trusted workflow.
@@ -333,14 +336,13 @@ Exit gate:
 
 Work:
 
-1. Create the `capture-core` library and organize it around configuration, selector policy, API types/state, video messages, and CLI definitions.
+1. Create the `capture-core` library and organize it around configuration, selector policy, API types/state, and video messages.
 2. Move and simplify the pure selector rules from `live-capture`; translate runtime observations at the boundary instead of admitting Win32 types into the library.
 3. Consolidate only the useful private video framing and AVCC helpers from `live-protocol`.
 4. Move the reusable video cache/fan-out ideas from `live-server`, correcting late-viewer startup to wait for a fresh IDR.
 5. Implement the Axum router against platform-neutral state and channel endpoints supplied by a future host.
 6. Define full-replacement configuration validation and last-valid retention.
-7. Define the Clap arguments once in the library.
-8. Add unit tests for selector decisions, validation failures, configuration generation, API error responses, video message parsing, and late-viewer gating.
+7. Add unit tests for selector decisions, validation failures, configuration generation, API error responses, video message parsing, and late-viewer gating.
 
 Failure rules:
 
@@ -360,8 +362,8 @@ Exit gate:
 
 Work:
 
-1. Create the `capture-windows` binary using the Clap definition from `capture-core`.
-2. Validate the exact target adapter, D3D11 features, WGC availability, and Media Foundation H.264 encoder at startup.
+1. Create the `capture-windows` binary with its process-local Clap definition and fixed loopback listener.
+2. Create and validate the default hardware adapter, D3D11 features, WGC availability, and exact Media Foundation H.264 encoder at startup.
 3. Move Windows observation from `live-capture` and feed plain fact snapshots into the pure selector.
 4. Move WGC session creation and target switching into the dedicated media thread; remove the hidden winit window and presentation path.
 5. Move crop, fixed-output resampling, reuse/clear semantics, and BGRA-to-NV12 conversion into the same device owner.
@@ -392,7 +394,7 @@ Exit gate:
 Work:
 
 1. Construct `capture-core` API state around the media thread's bounded channels.
-2. Bind the configured listener and serve the platform-independent Axum router from `capture-windows`.
+2. Bind the configured port on IPv4 loopback and serve the platform-independent Axum router from `capture-windows`.
 3. Expose status and full configuration replacement over REST.
 4. Stream render configuration, decoder configuration, timestamps, keyframe flags, and AVCC access units over the viewer WebSocket.
 5. Implement viewer counting, fresh-IDR startup, lag disconnect, and bounded reconnect behavior.
@@ -480,7 +482,7 @@ The following scenarios define M0 behavior on the target machine:
 
 M0 is complete when all of the following are true:
 
-- `capture-core` contains shared types, validated configuration, pure selector logic, the private instance API, video fan-out, and the shared Clap definition without Windows dependencies.
+- `capture-core` contains shared types, validated configuration, pure selector logic, the private instance API, and video fan-out without Windows dependencies.
 - `capture-windows` owns one target/session/stream process and directly connects WGC/D3D11 processing to Media Foundation encoding.
 - The native process serves its own REST and video interfaces without a relay, stdout media pipe, or shared cross-process texture.
 - A separately hosted browser viewer decodes opaque H.264 and performs transparency-producing processing in its canvas.

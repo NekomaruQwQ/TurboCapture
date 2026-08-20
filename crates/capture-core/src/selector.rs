@@ -1,6 +1,10 @@
 //! Pure deterministic target selection over platform-neutral window facts.
 
-use std::cmp::Ordering;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, btree_map::Entry},
+    mem,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -186,36 +190,71 @@ impl<'a> Candidate<'a> {
 pub(crate) fn validate_selection(
     config: &mut SelectionConfig,
     issues: &mut Vec<ValidationIssue>) -> SelectorPolicy {
-    let mut profiles = Vec::new();
-    let mut exclude_rules = Vec::new();
-    let mut names = Vec::new();
-    let mut all_includes = Vec::new();
-
-    for (profile_index, profile) in config.profiles.iter_mut().enumerate() {
-        profile.name = profile.name.trim().to_owned();
-        let profile_path = format!("selection.profiles[{profile_index}]");
-        if profile.name.is_empty() {
-            issues.push(ValidationIssue::new(
-                format!("{profile_path}.name"),
-                "empty_profile_name",
-                "profile name must not be empty"));
-        } else if names.contains(&profile.name) {
-            issues.push(ValidationIssue::new(
-                format!("{profile_path}.name"),
-                "duplicate_profile_name",
-                format!("profile name {:?} is duplicated", profile.name)));
-        } else {
-            names.push(profile.name.clone());
-        }
-
-        let include_rules = canonicalize_rules(
+    let mut canonical_profiles = BTreeMap::new();
+    for (authored_name, mut profile) in mem::take(&mut config.profiles) {
+        let name = authored_name.trim().to_owned();
+        let profile_path = format!("selection.profiles[{authored_name:?}]");
+        canonicalize_rules(
             &mut profile.include,
             &format!("{profile_path}.include"),
             issues);
-        let profile_excludes = canonicalize_rules(
+        canonicalize_rules(
             &mut profile.exclude,
             &format!("{profile_path}.exclude"),
             issues);
+
+        if name.is_empty() {
+            issues.push(ValidationIssue::new(
+                profile_path,
+                "empty_profile_name",
+                "profile name must not be empty"));
+        } else {
+            match canonical_profiles.entry(name) {
+                Entry::Occupied(entry) => issues.push(ValidationIssue::new(
+                    profile_path,
+                    "duplicate_profile_name",
+                    format!("canonical profile name {:?} is duplicated", entry.key()))),
+                Entry::Vacant(entry) => {
+                    entry.insert(profile);
+                }
+            }
+        }
+    }
+    config.profiles = canonical_profiles;
+
+    let mut profiles = Vec::new();
+    let mut exclude_rules = Vec::new();
+    let mut enabled_names = Vec::new();
+    let mut all_includes = Vec::new();
+
+    for (enabled_index, profile_name) in config.enabled.iter_mut().enumerate() {
+        *profile_name = profile_name.trim().to_owned();
+        let enabled_path = format!("selection.enabled[{enabled_index}]");
+        if profile_name.is_empty() {
+            issues.push(ValidationIssue::new(
+                enabled_path,
+                "empty_enabled_profile",
+                "enabled profile name must not be empty"));
+            continue;
+        }
+        if enabled_names.contains(profile_name) {
+            issues.push(ValidationIssue::new(
+                enabled_path,
+                "duplicate_enabled_profile",
+                format!("profile {profile_name:?} is enabled more than once")));
+            continue;
+        }
+        enabled_names.push(profile_name.clone());
+
+        let Some(profile) = config.profiles.get(profile_name) else {
+            issues.push(ValidationIssue::new(
+                enabled_path,
+                "unknown_enabled_profile",
+                format!("enabled profile {profile_name:?} is not defined")));
+            continue;
+        };
+        let include_rules = profile.include.iter().map(|rule| normalize(rule)).collect::<Vec<_>>();
+        let profile_excludes = profile.exclude.iter().map(|rule| normalize(rule));
         all_includes.extend(include_rules.iter().cloned());
         for rule in profile_excludes {
             if !exclude_rules.contains(&rule) {
@@ -223,7 +262,7 @@ pub(crate) fn validate_selection(
             }
         }
         profiles.push(SelectionProfile {
-            name: profile.name.clone(),
+            name: profile_name.clone(),
             include_rules,
         });
     }
@@ -248,7 +287,7 @@ pub(crate) fn validate_selection(
 fn canonicalize_rules(
     source: &mut [String],
     path: &str,
-    issues: &mut Vec<ValidationIssue>) -> Vec<String> {
+    issues: &mut Vec<ValidationIssue>) {
     let mut normalized = Vec::new();
     for (index, rule) in source.iter_mut().enumerate() {
         *rule = rule.trim().to_owned();
@@ -267,7 +306,6 @@ fn canonicalize_rules(
             normalized.push(normalized_rule);
         }
     }
-    normalized
 }
 
 /// Normalize Windows executable facts for slash- and case-insensitive matching.
@@ -282,23 +320,22 @@ mod tests {
 
     use super::*;
 
-    /// Build a policy whose vector order is the public priority contract.
+    /// Build a policy whose enabled order is the public priority contract.
     fn policy(prefer_foreground: bool) -> SelectorPolicy {
         InstanceConfig {
             selection: SelectionConfig {
                 prefer_foreground,
-                profiles: vec![
-                    SelectionProfileConfig {
-                        name: "code".to_owned(),
+                enabled: vec!["code".to_owned(), "games".to_owned()],
+                profiles: BTreeMap::from([
+                    ("code".to_owned(), SelectionProfileConfig {
                         include: vec!["Code.exe".to_owned()],
                         exclude: vec![],
-                    },
-                    SelectionProfileConfig {
-                        name: "games".to_owned(),
+                    }),
+                    ("games".to_owned(), SelectionProfileConfig {
                         include: vec!["D:/Games/".to_owned()],
                         exclude: vec!["private.exe".to_owned()],
-                    },
-                ],
+                    }),
+                ]),
             },
             source: SourceConfig::default(),
             video: VideoConfig {
@@ -423,15 +460,37 @@ mod tests {
     fn validation_should_reject_definite_rule_contradictions() {
         let mut config = SelectionConfig {
             prefer_foreground: false,
-            profiles: vec![SelectionProfileConfig {
-                name: "code".to_owned(),
-                include: vec!["Code.exe".to_owned()],
-                exclude: vec!["code.EXE".to_owned()],
-            }],
+            enabled: vec!["code".to_owned()],
+            profiles: BTreeMap::from([(
+                "code".to_owned(),
+                SelectionProfileConfig {
+                    include: vec!["Code.exe".to_owned()],
+                    exclude: vec!["code.EXE".to_owned()],
+                })]),
         };
         let mut issues = Vec::new();
 
         let _policy = validate_selection(&mut config, &mut issues);
         assert!(issues.iter().any(|issue| issue.code == "contradictory_rule"));
+    }
+
+    #[test]
+    fn validation_should_reject_unknown_and_duplicate_enabled_profiles() {
+        let mut config = SelectionConfig {
+            prefer_foreground: false,
+            enabled: vec!["missing".to_owned(), "code".to_owned(), " code ".to_owned()],
+            profiles: BTreeMap::from([(
+                "code".to_owned(),
+                SelectionProfileConfig {
+                    include: vec!["Code.exe".to_owned()],
+                    exclude: vec![],
+                })]),
+        };
+        let mut issues = Vec::new();
+
+        let _policy = validate_selection(&mut config, &mut issues);
+
+        assert!(issues.iter().any(|issue| issue.code == "unknown_enabled_profile"));
+        assert!(issues.iter().any(|issue| issue.code == "duplicate_enabled_profile"));
     }
 }

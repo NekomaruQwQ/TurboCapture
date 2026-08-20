@@ -646,7 +646,7 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, time::Duration};
+    use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
     use axum::{
         body::{Body, to_bytes},
@@ -678,11 +678,13 @@ mod tests {
         InstanceConfig {
             selection: SelectionConfig {
                 prefer_foreground: true,
-                profiles: vec![SelectionProfileConfig {
-                    name: "code".to_owned(),
-                    include: vec!["Code.exe".to_owned()],
-                    exclude: vec![],
-                }],
+                enabled: vec!["code".to_owned()],
+                profiles: BTreeMap::from([(
+                    "code".to_owned(),
+                    SelectionProfileConfig {
+                        include: vec!["Code.exe".to_owned()],
+                        exclude: vec![],
+                    })]),
             },
             source: SourceConfig::default(),
             video: VideoConfig {
@@ -1054,8 +1056,10 @@ mod tests {
     async fn bound_instances_should_serve_distinct_configuration() {
         let (router_a, _host_a) = test_service();
         let mut config_b = test_config();
-        config_b.selection.profiles[0].name = "terminal".to_owned();
-        config_b.selection.profiles[0].include = vec!["WindowsTerminal.exe".to_owned()];
+        config_b.selection.enabled[0] = "terminal".to_owned();
+        let mut terminal = config_b.selection.profiles.remove("code").unwrap();
+        terminal.include = vec!["WindowsTerminal.exe".to_owned()];
+        config_b.selection.profiles.insert("terminal".to_owned(), terminal);
         let (mut service_b, _host_b) = InstanceService::new(
             config_b.validate().unwrap(),
             ChannelCapacities::default())
@@ -1068,8 +1072,8 @@ mod tests {
         let config_b = fetch_bound_config(address_b).await;
 
         assert_eq!(
-            (&config_a["config"]["selection"]["profiles"][0]["name"],
-                &config_b["config"]["selection"]["profiles"][0]["name"]),
+            (&config_a["config"]["selection"]["enabled"][0],
+                &config_b["config"]["selection"]["enabled"][0]),
             (&serde_json::json!("code"), &serde_json::json!("terminal")));
         server_a.abort();
         server_b.abort();

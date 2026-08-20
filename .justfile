@@ -8,7 +8,7 @@ list:
 build:
     cargo build --release --workspace --locked
 
-# Run the Windows capture server, forwarding any capture-core arguments.
+# Run the Windows capture server, forwarding its startup arguments.
 capture *args:
     cargo run --release --locked -p capture-windows -- {{args}}
 

@@ -1,7 +1,7 @@
 //! Complete instance configuration, validation, and generation snapshots.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::File,
     io::Read as _,
     path::{Path, PathBuf},
@@ -37,7 +37,7 @@ impl InstanceConfig {
     /// Validates and canonicalizes one complete candidate.
     ///
     /// Validation never returns a partially usable configuration. Profile
-    /// names and matching rules are trimmed before the accepted value is stored.
+    /// keys, enabled names, and matching rules are trimmed before storage.
     pub fn validate(mut self) -> Result<ValidatedInstanceConfig, ConfigError> {
         let mut issues = Vec::new();
         let selector = validate_selection(&mut self.selection, &mut issues);
@@ -60,17 +60,18 @@ pub struct SelectionConfig {
     /// Prefer the foreground candidate after profile priority is applied.
     #[serde(default)]
     pub prefer_foreground: bool,
-    /// Enabled profiles in descending priority order.
+    /// Profile names enabled in descending priority order.
     #[serde(default)]
-    pub profiles: Vec<SelectionProfileConfig>,
+    pub enabled: Vec<String>,
+    /// Reusable profile definitions keyed by stable human-facing name.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, SelectionProfileConfig>,
 }
 
-/// One enabled selector profile and its executable-path rules.
+/// One selector profile definition and its executable-path rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectionProfileConfig {
-    /// Stable human-facing label included in status and render selection.
-    pub name: String,
     /// Case-insensitive executable-path substrings accepted by this profile.
     #[serde(default)]
     pub include: Vec<String>,
@@ -383,25 +384,20 @@ fn validate_video(video: &VideoConfig, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-/// Validate renderer limits and ensure overrides name active selector profiles.
+/// Validate renderer limits and ensure overrides name defined selector profiles.
 fn validate_render(
     selection: &SelectionConfig,
     render: &RenderProfiles,
     issues: &mut Vec<ValidationIssue>) {
     validate_render_config("render.default", &render.default, issues);
 
-    let profile_names = selection
-        .profiles
-        .iter()
-        .map(|profile| profile.name.as_str())
-        .collect::<BTreeSet<_>>();
     for (profile_name, config) in &render.profiles {
         let path = format!("render.profiles.{profile_name}");
-        if !profile_names.contains(profile_name.as_str()) {
+        if !selection.profiles.contains_key(profile_name) {
             issues.push(ValidationIssue::new(
                 &path,
                 "unknown_render_profile",
-                "render override must name an enabled selection profile"));
+                "render override must name a defined selection profile"));
         }
         validate_render_config(&path, config, issues);
     }
@@ -442,11 +438,13 @@ mod tests {
         InstanceConfig {
             selection: SelectionConfig {
                 prefer_foreground: true,
-                profiles: vec![SelectionProfileConfig {
-                    name: "code".to_owned(),
-                    include: vec!["Code.exe".to_owned()],
-                    exclude: vec![],
-                }],
+                enabled: vec!["code".to_owned()],
+                profiles: BTreeMap::from([(
+                    "code".to_owned(),
+                    SelectionProfileConfig {
+                        include: vec!["Code.exe".to_owned()],
+                        exclude: vec![],
+                    })]),
             },
             source: SourceConfig::default(),
             video: VideoConfig {
@@ -495,6 +493,28 @@ mod tests {
             panic!("expected semantic validation failure");
         };
         assert_eq!(issues[0].code, "unknown_render_profile");
+    }
+
+    #[test]
+    fn render_override_should_allow_a_disabled_defined_profile() {
+        let mut config = valid_config();
+        config.selection.enabled.clear();
+        config.render.profiles.insert("code".to_owned(), RenderConfig::default());
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn selection_profile_names_should_be_canonicalized_across_catalog_and_enabled_list() {
+        let mut config = valid_config();
+        let profile = config.selection.profiles.remove("code").unwrap();
+        config.selection.profiles.insert("  code  ".to_owned(), profile);
+        config.selection.enabled[0] = "  code  ".to_owned();
+
+        let validated = config.validate().unwrap();
+
+        assert!(validated.config().selection.profiles.contains_key("code"));
+        assert_eq!(validated.config().selection.enabled, ["code"]);
     }
 
     #[test]

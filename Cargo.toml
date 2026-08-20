@@ -1,3 +1,5 @@
+# @human-maintained
+
 [workspace]
 resolver = "3"
 members = [
@@ -20,10 +22,10 @@ anyhow = "1.0"
 axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 clap = { version = "4.6.6", features = ["derive"] }
-env_logger = "0.11.11"
 euclid = "0.22.14"
 futures-util = "0.3.34"
 log = "0.4.33"
+pretty_env_logger = "0.5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.20"
@@ -33,16 +35,12 @@ toml = "1.1.4"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["cors"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation"] }
-
-[workspace.dependencies.reqwest]
-version = "0.13.4"
-default-features = false
-features = ["stream"]
+reqwest = { version = "0.13.4", default-features = false, features = ["stream"] }
 
 [workspace.lints.clippy]
-cargo       = { level = "warn", priority = -1 }
-nursery     = { level = "warn", priority = -1 }
-pedantic    = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 restriction = { level = "warn", priority = -1 }
 
 # I-language cargo
@@ -55,7 +53,7 @@ doc_markdown = "allow" # allow non-words in docs without requiring backticks
 # I-language #restriction
 arbitrary_source_item_ordering = "allow"
 as_conversions = "allow"
-big_endian_bytes = "allow" # allows using `to_be_bytes` and `from_be_bytes`
+big_endian_bytes = "allow"                 # allows using `to_be_bytes` and `from_be_bytes`
 blanket_clippy_restriction_lints = "allow"
 default_numeric_fallback = "allow"
 exhaustive_enums = "allow"
@@ -65,9 +63,9 @@ implicit_return = "allow"
 indexing_slicing = "allow"
 inline_modules = "allow"
 inline_trait_bounds = "allow"
-let_underscore_must_use = "allow" # allows ignoring results of functions marked `#[must_use]`
+let_underscore_must_use = "allow"          # allows ignoring results of functions marked `#[must_use]`
 let_underscore_untyped = "allow"
-little_endian_bytes = "allow" # allows using `to_le_bytes` and `from_le_bytes`
+little_endian_bytes = "allow"              # allows using `to_le_bytes` and `from_le_bytes`
 missing_docs_in_private_items = "allow"
 missing_inline_in_public_items = "allow"
 missing_trait_methods = "allow"
@@ -108,12 +106,12 @@ modulo_arithmetic = "allow"
 needless_borrowed_reference = "allow" # or: `clippy::pattern_type_mismatch`
 
 # III-conflicting-lints #style
-needless_else = "allow"               # or: `clippy::else_if_without_else`
+needless_else = "allow" # or: `clippy::else_if_without_else`
 
 # III-conflicting-lints #restriction
-pub_with_shorthand = "allow"          # xor: `clippy::pub_without_shorthand`
-semicolon_outside_block = "allow"     # xor: `clippy::semicolon_inside_block`
-unseparated_literal_suffix = "allow"  # xor: `clippy::separated_literal_suffix`
+pub_with_shorthand = "allow"         # xor: `clippy::pub_without_shorthand`
+semicolon_outside_block = "allow"    # xor: `clippy::semicolon_inside_block`
+unseparated_literal_suffix = "allow" # xor: `clippy::separated_literal_suffix`
 
 # IV-code-style #style
 doc_overindented_list_items = "allow" # allows using 4 spaces for indenting docs
@@ -121,21 +119,21 @@ manual_range_contains = "allow"       # makes code less noisy
 match_ref_pats = "allow"              # just looks cool XD
 
 # IV-code-style #nursery
-option_if_let_else = "allow"          # helps readability in some cases
-suboptimal_flops = "allow"            # makes code less noisy
+option_if_let_else = "allow" # helps readability in some cases
+suboptimal_flops = "allow"   # makes code less noisy
 
 # IV-code-style #pedantic
-if_not_else = "allow"                 # helps readability in many cases
-map_unwrap_or = "allow"               # helps readability in some cases
+if_not_else = "allow"             # helps readability in many cases
+map_unwrap_or = "allow"           # helps readability in some cases
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-module_name_repetitions = "allow"     # e.g.: `winit::window::WindowBuilder`
+module_name_repetitions = "allow" # e.g.: `winit::window::WindowBuilder`
 must_use_candidate = "allow"
 wildcard_imports = "allow"
 
+absolute_paths = "allow"
 # IV-code-style #restriction
 as_underscore = "allow"
-absolute_paths = "allow"
 impl_trait_in_params = "allow"
 min_ident_chars = "allow"
 mod_module_files = "allow"
