@@ -79,11 +79,13 @@ impl H264Encoder {
         adapter_luid: u64,
         config: &VideoConfig) -> anyhow::Result<Self> {
         let (transform, name) = activate_nvidia_encoder(adapter_luid)?;
-        let encoder = Self::initialize(device, transform, config)
+        let target_bit_rate = config.target_bit_rate();
+        let encoder = Self::initialize(device, transform, config, target_bit_rate)
             .with_context(|| format!(
                 "failed to initialize NVIDIA encoder '{name}' on adapter 0x{adapter_luid:016X}"))?;
+        let bit_rate_source = if config.bit_rate.is_some() { "configured" } else { "inferred" };
         log::info!(
-            "validated NVIDIA hardware encoder '{name}' at {}x{} @ {} fps",
+            "validated NVIDIA hardware encoder '{name}' at {}x{} @ {} fps using {target_bit_rate} bps ({bit_rate_source})",
             config.width,
             config.height,
             config.frame_rate);
@@ -95,7 +97,8 @@ impl H264Encoder {
     fn initialize(
         device: &ID3D11Device,
         transform: IMFTransform,
-        config: &VideoConfig) -> anyhow::Result<Self> {
+        config: &VideoConfig,
+        target_bit_rate: u32) -> anyhow::Result<Self> {
         // SAFETY: The activated transform owns and returns its attributes object.
         let attributes = unsafe { transform.GetAttributes() }
             .context("failed to read encoder attributes")?;
@@ -112,7 +115,7 @@ impl H264Encoder {
         configure_common_video_type(&output_type, config)?;
         // SAFETY: Output type is H.264 and the fixed attributes are valid.
         unsafe {
-            output_type.SetUINT32(&MF_MT_AVG_BITRATE, config.bit_rate)?;
+            output_type.SetUINT32(&MF_MT_AVG_BITRATE, target_bit_rate)?;
             output_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
             transform.SetOutputType(0, &output_type, 0)
         }.context("failed to set fixed H.264 output type")?;

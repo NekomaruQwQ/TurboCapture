@@ -342,7 +342,7 @@ mod tests {
                 width: 1920,
                 height: 1200,
                 frame_rate: 60,
-                bit_rate: 8_000_000,
+                bit_rate: None,
             },
             render: RenderProfiles::default(),
         }

@@ -28,12 +28,15 @@ exclude = []
 width = 1920
 height = 1080
 frame_rate = 60
-bit_rate = 12000000
 
 [render.default]
 key_colors = [[0, 255, 0]]
 color_key_knee = { low = 0.02, high = 0.98 }
 ```
+
+The H.264 bitrate is inferred as `width * height * frame_rate / 4` for the ordinary high-fidelity
+localhost path. Add an optional `bit_rate` value under `[video]` only when a constrained link or
+measured encoder behavior needs an explicit bits-per-second override.
 
 Then start the capture endpoint and viewer in separate terminals:
 

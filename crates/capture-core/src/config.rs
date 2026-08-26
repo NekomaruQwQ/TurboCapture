@@ -13,6 +13,9 @@ use crate::selector::{SelectorPolicy, validate_selection};
 /// Maximum number of simultaneous key colors supported by the browser shader.
 pub const MAX_RENDER_KEYS: usize = 8;
 
+/// Four pixel-frames per output bit keeps local low-latency CBR visually conservative.
+const INFERRED_BIT_RATE_PIXEL_FRAME_DIVISOR: u64 = 4;
+
 /// One complete live capture-instance configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,8 +112,29 @@ pub struct VideoConfig {
     pub height: u32,
     /// Nominal encoded frame rate.
     pub frame_rate: u32,
-    /// Target H.264 bitrate in bits per second.
-    pub bit_rate: u32,
+    /// Optional H.264 bitrate override in bits per second.
+    ///
+    /// When absent, [`Self::target_bit_rate`] derives a high-fidelity local-stream
+    /// target from output geometry and cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_rate: Option<u32>,
+}
+
+impl VideoConfig {
+    /// Returns the configured bitrate or a high-fidelity target inferred at 0.25
+    /// bits per pixel per frame.
+    ///
+    /// Extreme unvalidated inputs saturate at Media Foundation's `u32` attribute
+    /// limit rather than overflowing. Validated practical video modes remain exact.
+    pub fn target_bit_rate(&self) -> u32 {
+        self.bit_rate.unwrap_or_else(|| {
+            let pixel_frames_per_second = u64::from(self.width)
+                .saturating_mul(u64::from(self.height))
+                .saturating_mul(u64::from(self.frame_rate));
+            let inferred = pixel_frames_per_second / INFERRED_BIT_RATE_PIXEL_FRAME_DIVISOR;
+            u32::try_from(inferred).unwrap_or(u32::MAX)
+        })
+    }
 }
 
 /// Default browser rendering parameters plus per-profile overrides.
@@ -351,11 +375,11 @@ fn validate_video(video: &VideoConfig, issues: &mut Vec<ValidationIssue>) {
             "zero_frame_rate",
             "frame_rate must be non-zero"));
     }
-    if video.bit_rate == 0 {
+    if video.bit_rate == Some(0) {
         issues.push(ValidationIssue::new(
             "video.bit_rate",
             "zero_bit_rate",
-            "bit_rate must be non-zero"));
+            "bit_rate override must be non-zero"));
     }
 }
 
@@ -426,7 +450,7 @@ mod tests {
                 width: 1920,
                 height: 1200,
                 frame_rate: 60,
-                bit_rate: 8_000_000,
+                bit_rate: None,
             },
             render: RenderProfiles::default(),
         }
@@ -457,6 +481,71 @@ mod tests {
             panic!("expected restart-required failure");
         };
         assert_eq!(fields, ["video"]);
+    }
+
+    #[test]
+    fn video_bit_rate_should_scale_with_pixel_rate() {
+        let actual = [
+            (1280, 720, 60),
+            (1920, 1080, 30),
+            (1920, 1080, 60),
+            (2560, 1440, 60),
+            (3840, 2160, 60),
+        ].map(|(width, height, frame_rate)| VideoConfig {
+            width,
+            height,
+            frame_rate,
+            bit_rate: None,
+        }.target_bit_rate());
+
+        assert_eq!(actual, [13_824_000, 15_552_000, 31_104_000, 55_296_000, 124_416_000]);
+    }
+
+    #[test]
+    fn explicit_video_bit_rate_should_override_inference() {
+        let mut video = valid_config().video;
+        video.bit_rate = Some(18_000_000);
+
+        assert_eq!(video.target_bit_rate(), 18_000_000);
+    }
+
+    #[test]
+    fn inferred_video_bit_rate_should_saturate_for_unvalidated_extreme_inputs() {
+        let video = VideoConfig {
+            width: u32::MAX,
+            height: u32::MAX,
+            frame_rate: u32::MAX,
+            bit_rate: None,
+        };
+
+        assert_eq!(video.target_bit_rate(), u32::MAX);
+    }
+
+    #[test]
+    fn configuration_should_allow_omitted_video_bit_rate() {
+        let config = toml::from_str::<InstanceConfig>("
+            [selection]
+
+            [video]
+            width = 1920
+            height = 1080
+            frame_rate = 60
+        ").unwrap().validate().unwrap();
+
+        assert_eq!(
+            (config.config().video.bit_rate, config.config().video.target_bit_rate()),
+            (None, 31_104_000));
+    }
+
+    #[test]
+    fn validation_should_reject_zero_video_bit_rate_override() {
+        let mut config = valid_config();
+        config.video.bit_rate = Some(0);
+
+        let ConfigError::Invalid { issues } = config.validate().unwrap_err() else {
+            panic!("expected semantic validation failure");
+        };
+        assert_eq!(issues[0].code, "zero_bit_rate");
     }
 
     #[test]

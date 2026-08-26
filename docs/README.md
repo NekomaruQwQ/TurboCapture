@@ -85,7 +85,6 @@ max_y = 1080
 width = 1920
 height = 1080
 frame_rate = 60
-bit_rate = 12000000
 
 [render.default]
 key_colors = [[0, 255, 0]]
@@ -105,6 +104,9 @@ remains sticky, with the foreground preference used when choosing among otherwis
 `source.crop` is optional and uses inclusive minimum/exclusive maximum captured-texture coordinates.
 The native pipeline clamps it to the live texture and aspect-fits it into the fixed opaque output,
 clearing unused pixels. Video width and height must be non-zero, even, and representable as `u16`.
+The H.264 CBR target defaults to `width * height * frame_rate / 4`, prioritizing keyed-edge accuracy
+on the ordinary localhost path. Set optional `video.bit_rate` in bits per second only when a constrained
+link or a measured encoder behavior requires an explicit override.
 
 `render.default` is used while no profile override applies. Each `render.profiles` key must name a
 defined selection profile, which may currently be disabled. Up to eight sRGB key colors are supported.
