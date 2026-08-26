@@ -26,7 +26,14 @@ TurboCapture targets exactly the current livestreaming machine:
 
 Other operating systems, older Windows versions, fallback GPUs, unknown adapters, software encoders, and degraded feature sets are unsupported. A mismatch in a required hardware or platform invariant is a fatal startup error with a useful diagnostic. M0 does not add compatibility layers, capability negotiation, or fallback implementations for environments that will not be used.
 
-Hardware identifiers and capabilities may be explicit configuration or constants when that makes the intended environment clearer. They should still be validated at startup so a machine change fails immediately rather than producing subtly incorrect capture.
+Hardware selection is automatic and follows one fixed policy. Select adapter index zero from
+`IDXGIFactory6::EnumAdapterByGpuPreference` with `DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`, reject software
+adapters, and create the D3D11 device on that adapter. Enumerate hardware NV12-to-H.264 transforms for
+its LUID in Media Foundation's preference order and choose the first friendly name containing
+`nvidia` (ASCII case-insensitive). Hardware identities are logged rather than supplied through CLI or
+configuration. Required capabilities are validated at startup; an unsuitable preferred adapter,
+missing NVIDIA encoder, or failed initialization terminates the process without trying another GPU
+or encoder. The encoder shares the capture device through the DXGI device manager.
 
 ## 2. Source-Run, Single-Machine Deployment
 
@@ -154,7 +161,7 @@ Configuration updates are complete replacements, not partially applied patches. 
 
 Settings fall into two categories:
 
-- Startup settings, such as port and encoder identity, take effect by restarting the process.
+- Startup settings, such as port and video output settings, take effect by restarting the process. Automatic hardware selection is fixed for that process lifetime.
 - Live settings, such as selection rules, crop, output geometry where supported, and browser render parameters, may be replaced while the process runs.
 
 M0 distinguishes expected runtime conditions from broken invariants:

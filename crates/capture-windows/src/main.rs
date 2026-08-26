@@ -71,11 +71,7 @@ async fn run_instance(
     let router = service.router()?;
     let mut completion = service.take_media_completion()
         .context("capture-core media completion receiver was already taken")?;
-    let media_thread = media::spawn(
-        media::MediaStartup {
-            encoder_name: args.encoder_name.clone(),
-        },
-        channels)?;
+    let media_thread = media::spawn(channels)?;
     log::info!("capture instance API listening on http://{address}");
 
     let server = axum::serve(listener, router).into_future();

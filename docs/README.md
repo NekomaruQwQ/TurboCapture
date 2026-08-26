@@ -46,7 +46,7 @@ or implement a placeholder crate for it.
 M0 intentionally assumes:
 
 - Windows 11 on the current livestreaming machine.
-- The default DXGI hardware adapter and an explicitly named adapter-filtered H.264 transform.
+- DXGI's first high-performance adapter and an NVIDIA hardware H.264 transform on that adapter.
 - Windows Graphics Capture, D3D11 video processing, NV12 surfaces, and the Windows SDK `fxc.exe`.
 - A current Rust toolchain and Cargo.
 - Bun for the frontend; Nushell and `just` for the repository recipes.
@@ -120,17 +120,29 @@ Build everything once:
 just build
 ```
 
-Start one process with explicit port and encoder identity:
+Start one process with an explicit configuration and port:
 
 ```console
 $env.RUST_LOG = "info"
-just capture --config data/minecraft.toml --port 48100 --encoder-name "NVIDIA H.264 Encoder MFT"
+just capture --config data/minecraft.toml --port 48100
 ```
 
-`--config`, `--port`, and `--encoder-name` are required. The process binds `127.0.0.1`, creates its
-D3D11 device on the default hardware adapter, and filters encoder discovery using that device's LUID.
-Port, encoder, and video settings are process-generation settings: stop and replace the process to
-change them. Logging is configured exclusively through `RUST_LOG`.
+Only `--config` and `--port` are required. The process binds `127.0.0.1` and selects adapter index zero
+from `IDXGIFactory6::EnumAdapterByGpuPreference` with `DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`. It rejects
+software adapters and creates the D3D11 device on that explicit adapter.
+
+Encoder discovery uses the adapter's LUID, NV12 input, H.264 output, and
+`MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER`. The first candidate whose friendly name contains
+`nvidia` (ASCII case-insensitive) is selected in Media Foundation's returned preference order. The
+encoder must support D3D11 input and receives the same device used by capture and conversion.
+
+Adapter and encoder identities are logged, not configured through CLI or TOML. High-performance
+preference does not guarantee NVIDIA: an unsupported preferred adapter, no matching NVIDIA encoder,
+or failure to initialize the selected encoder is fatal. Lower-ranked GPUs and alternative encoders
+are not tried. Driver changes may change the selections on the next process start.
+
+Port and video settings require process restart to change; hardware selection is also fixed for the
+process lifetime. Logging is configured exclusively through `RUST_LOG`.
 
 Start the viewer on its own local port:
 
@@ -207,7 +219,7 @@ The meaningful live states are `waiting`, `switching`, and `capturing`. No eligi
 closure, viewer disconnect, and live configuration rejection are recoverable. Status remains available
 while the process waits for a matching window.
 
-An unavailable or incompatible default adapter or encoder, unsupported graphics capability, bind
+An unavailable or incompatible preferred adapter or NVIDIA encoder, unsupported graphics capability, bind
 failure, unrecoverable D3D/WGC/Media Foundation failure, or internal invariant violation is fatal and
 returns a non-zero process exit. M0 intentionally delegates process restart to the operator or a
 future control surface.

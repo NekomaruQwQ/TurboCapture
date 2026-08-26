@@ -11,7 +11,7 @@ authenticated, TLS-enabled, or intended for an untrusted network.
 ## Start one stream
 
 Requirements: current Rust, Windows 11 and its SDK (`fxc.exe`), Bun, Nushell, `just`, a Chromium
-browser with WebCodecs/WebGL2, and the exact Media Foundation encoder name for the capture machine.
+browser with WebCodecs/WebGL2, and an NVIDIA hardware H.264 encoder on the preferred GPU.
 
 Create an ignored local configuration such as `data/minecraft.toml`:
 
@@ -39,12 +39,16 @@ Then start the capture endpoint and viewer in separate terminals:
 
 ```console
 $env.RUST_LOG = "info"
-just capture --config data/minecraft.toml --port 48100 --encoder-name "NVIDIA H.264 Encoder MFT"
+just capture --config data/minecraft.toml --port 48100
 just viewer 4173
 ```
 
-The process creates a device on the default hardware adapter, restricts encoder discovery to that
-adapter, and binds its private API to `127.0.0.1` automatically.
+The process selects adapter index zero from `IDXGIFactory6::EnumAdapterByGpuPreference` with
+`DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`, then chooses the first hardware NV12-to-H.264 encoder on that
+adapter whose friendly name contains `nvidia` (ASCII case-insensitive). Encoder candidates follow
+Media Foundation's preference ordering. The process logs both selections and binds its private API
+to `127.0.0.1` automatically. An unsuitable preferred GPU or missing NVIDIA encoder is fatal; no other
+GPU or encoder is tried after selection.
 
 Open `http://127.0.0.1:4173/#/canvas?port=48100`. The same URL can be used as an iframe or browser
 source; the `port` parameter belongs to the frontend route and selects

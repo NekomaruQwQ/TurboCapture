@@ -1,4 +1,4 @@
-//! Selected-adapter asynchronous Media Foundation H.264 encoder.
+//! Selected-adapter asynchronous NVIDIA Media Foundation H.264 encoder.
 
 #![expect(
     non_upper_case_globals,
@@ -61,7 +61,7 @@ pub enum EncoderEvent {
     Other(MF_EVENT_TYPE),
 }
 
-/// Exact hardware encoder and its fixed media-type/device-manager state.
+/// Selected NVIDIA encoder and its fixed media-type/device-manager state.
 pub struct H264Encoder {
     transform: IMFTransform,
     event_generator: IMFMediaEventGenerator,
@@ -70,17 +70,40 @@ pub struct H264Encoder {
 }
 
 impl H264Encoder {
-    /// Enumerate on one adapter, match the exact friendly name, and start streaming.
-    #[expect(clippy::multiple_unsafe_ops_per_block, reason = "ordered MF media-type transactions")]
+    /// Select the first NVIDIA encoder on the device's adapter and start streaming.
+    ///
+    /// `adapter_luid` must identify the adapter owning `device`. Selection and
+    /// initialization errors are fatal; no alternative encoder is attempted.
     pub fn new(
         device: &ID3D11Device,
         adapter_luid: u64,
-        encoder_name: &str,
         config: &VideoConfig) -> anyhow::Result<Self> {
-        let transform = activate_exact_encoder(adapter_luid, encoder_name)?;
+        let (transform, name) = activate_nvidia_encoder(adapter_luid)?;
+        let encoder = Self::initialize(device, transform, config)
+            .with_context(|| format!(
+                "failed to initialize NVIDIA encoder '{name}' on adapter 0x{adapter_luid:016X}"))?;
+        log::info!(
+            "validated NVIDIA hardware encoder '{name}' at {}x{} @ {} fps",
+            config.width,
+            config.height,
+            config.frame_rate);
+        Ok(encoder)
+    }
+
+    /// Configure the selected transform without changing its adapter or retrying.
+    #[expect(clippy::multiple_unsafe_ops_per_block, reason = "ordered MF media-type transactions")]
+    fn initialize(
+        device: &ID3D11Device,
+        transform: IMFTransform,
+        config: &VideoConfig) -> anyhow::Result<Self> {
         // SAFETY: The activated transform owns and returns its attributes object.
         let attributes = unsafe { transform.GetAttributes() }
             .context("failed to read encoder attributes")?;
+        // A hardware transform must accept our D3D11 textures, not just CPU NV12.
+        // SAFETY: This reads a documented capability from the live transform.
+        let d3d11_aware = unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }
+            .context("selected encoder does not advertise D3D11 awareness")?;
+        ensure!(d3d11_aware != 0, "selected encoder does not support D3D11 input");
         // SAFETY: This documented opt-in must precede async MFT operation.
         unsafe { attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) }
             .context("failed to unlock asynchronous encoder")?;
@@ -129,11 +152,6 @@ impl H264Encoder {
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
         }.context("failed to start H.264 encoder streaming")?;
-        log::info!(
-            "validated exact hardware encoder '{encoder_name}' at {}x{} @ {} fps",
-            config.width,
-            config.height,
-            config.frame_rate);
         Ok(Self {
             transform,
             event_generator,
@@ -293,10 +311,11 @@ impl IMFAsyncCallback_Impl for SurfaceReleaseCallback_Impl {
     }
 }
 
-/// Enumerate hardware encoders filtered to the selected adapter and friendly name.
-fn activate_exact_encoder(
-    adapter_luid: u64,
-    encoder_name: &str) -> anyhow::Result<IMFTransform> {
+/// Activate the first NVIDIA match in Media Foundation's adapter-filtered order.
+///
+/// Returns the transform and its diagnostic name. Empty results, missing NVIDIA
+/// matches, invalid enumeration data, and activation failures are fatal.
+fn activate_nvidia_encoder(adapter_luid: u64) -> anyhow::Result<(IMFTransform, String)> {
     let mut attributes = None;
     // SAFETY: The output option is initialized and one slot is sufficient.
     unsafe { MFCreateAttributes(&raw mut attributes, 1) }
@@ -316,11 +335,13 @@ fn activate_exact_encoder(
     };
     let mut raw = ptr::null_mut();
     let mut count = 0u32;
+    // Hardware MFTs are already asynchronous. ASYNCMFT would also admit software
+    // transforms; SORTANDFILTER preserves Media Foundation's preference order.
     // SAFETY: Type descriptors and output pointers remain valid through enumeration.
     unsafe {
         MFTEnum2(
             MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
             Some(&raw const input),
             Some(&raw const output),
             &attributes,
@@ -328,23 +349,35 @@ fn activate_exact_encoder(
             &raw mut count)
     }.context("failed to enumerate H.264 encoders on the selected adapter")?;
     let activations = ActivationArray { raw, count: count as usize };
-    ensure!(!activations.is_empty(), "selected adapter exposes no async hardware H.264 encoder");
+    ensure!(
+        !activations.is_empty(),
+        "adapter 0x{adapter_luid:016X} exposes no hardware NV12-to-H.264 encoder");
 
-    let mut names = Vec::new();
-    for activation in activations.iter() {
-        let activation = activation.as_ref().context("encoder enumeration returned a null activation")?;
-        let name = attribute_string(activation, &MFT_FRIENDLY_NAME_Attribute)?;
-        names.push(name.clone());
-        if name == encoder_name {
-            // SAFETY: Exact-name activation comes from adapter-filtered enumeration.
-            return unsafe { activation.ActivateObject::<IMFTransform>() }
-                .with_context(|| format!("failed to activate exact encoder '{encoder_name}'"));
-        }
-    }
-    anyhow::bail!(
-        "encoder '{encoder_name}' is unavailable on adapter 0x{adapter_luid:016X}; available: {}",
-        names.join(", "))
+    let names = activations.iter()
+        .map(|activation| {
+            let activation = activation.as_ref()
+                .context("encoder enumeration returned a null activation")?;
+            attribute_string(activation, &MFT_FRIENDLY_NAME_Attribute)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let index = nvidia_encoder_index(&names).with_context(|| format!(
+        "no NVIDIA hardware NV12-to-H.264 encoder on adapter 0x{adapter_luid:016X}; available: {}",
+        names.join(", ")))?;
+    let activation = activations.iter().nth(index).and_then(Option::as_ref)
+        .context("selected NVIDIA encoder activation is missing")?;
+    let name = names.into_iter().nth(index)
+        .context("selected NVIDIA encoder name is missing")?;
+    log::info!("selected NVIDIA encoder '{name}' on adapter 0x{adapter_luid:016X}");
+    // SAFETY: The selected activation belongs to this adapter's hardware results.
+    let transform = unsafe { activation.ActivateObject::<IMFTransform>() }
+        .with_context(|| format!(
+            "failed to activate NVIDIA encoder '{name}' on adapter 0x{adapter_luid:016X}"))?;
+    Ok((transform, name))
 }
+
+/// Preserve OS ordering while matching the historical ASCII vendor substring.
+/// Returns no index for an empty list or when no NVIDIA name is present.
+fn nvidia_encoder_index(names: &[String]) -> Option<usize> { names.iter().position(|name| name.to_ascii_lowercase().contains("nvidia")) }
 
 /// CoTaskMem-owned activation array with deterministic COM release.
 struct ActivationArray {
@@ -500,5 +533,37 @@ impl Drop for BufferLock<'_> {
         if let Err(error) = unsafe { self.buffer.Unlock() } {
             log::error!("failed to unlock encoded media buffer: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nvidia_selection_should_ignore_ascii_case_and_allow_name_variants() {
+        for name in ["NVIDIA H.264 Encoder MFT", "nvidia encoder", "Vendor nViDiA H264"] {
+            assert_eq!(nvidia_encoder_index(&[name.to_owned()]), Some(0));
+        }
+    }
+
+    #[test]
+    fn nvidia_selection_should_skip_other_vendors_and_preserve_first_match() {
+        let names = ["Intel H.264 Encoder", "NVIDIA Preferred Encoder", "NVIDIA Other Encoder"]
+            .map(str::to_owned);
+
+        assert_eq!(nvidia_encoder_index(&names), Some(1));
+    }
+
+    #[test]
+    fn nvidia_selection_should_reject_non_nvidia_names() {
+        let names = ["Intel H.264 Encoder", "AMD H.264 Encoder", ""].map(str::to_owned);
+
+        assert_eq!(nvidia_encoder_index(&names), None);
+    }
+
+    #[test]
+    fn nvidia_selection_should_reject_empty_enumeration() {
+        assert_eq!(nvidia_encoder_index(&[]), None);
     }
 }

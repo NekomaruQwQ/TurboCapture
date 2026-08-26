@@ -34,17 +34,8 @@ use crate::{
     observation::{NativeObservation, observe_windows},
 };
 
-/// Fixed startup identity not replaceable through the configuration channel.
-#[derive(Debug, Clone)]
-pub struct MediaStartup {
-    /// Exact adapter-filtered H.264 MFT friendly name.
-    pub encoder_name: String,
-}
-
 /// Spawn one named native owner and convert every exit into one completion event.
-pub fn spawn(
-    startup: MediaStartup,
-    channels: HostChannels) -> anyhow::Result<JoinHandle<()>> {
+pub fn spawn(channels: HostChannels) -> anyhow::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("capture-media".to_owned())
         .spawn(move || {
@@ -55,9 +46,7 @@ pub fn spawn(
                 video,
                 completion,
             } = channels;
-            let result = run_owner(
-                &startup,
-                MediaChannels { configurations, commands, status, video });
+            let result = run_owner(MediaChannels { configurations, commands, status, video });
             let completion_value = match result {
                 Ok(()) => MediaCompletion::Clean,
                 Err(error) => MediaCompletion::Fatal { message: format!("{error:#}") },
@@ -77,7 +66,7 @@ struct MediaChannels {
 }
 
 /// Initialize native foundations in strict ownership order and enter the MFT loop.
-fn run_owner(startup: &MediaStartup, channels: MediaChannels) -> anyhow::Result<()> {
+fn run_owner(channels: MediaChannels) -> anyhow::Result<()> {
     let _com = ComApartment::initialize()?;
     let _media_foundation = MediaFoundation::start()?;
     let device = device::create_and_validate()?;
@@ -92,9 +81,8 @@ fn run_owner(startup: &MediaStartup, channels: MediaChannels) -> anyhow::Result<
     let encoder = H264Encoder::new(
         &device.device,
         device.adapter_luid,
-        &startup.encoder_name,
         video_config)
-        .context("failed to initialize exact H.264 encoder")?;
+        .context("failed to initialize NVIDIA H.264 encoder on the preferred adapter")?;
     let packetizer = H264Packetizer::new(video_config.width, video_config.height);
     let frame_clock = FrameClock::new(video_config.frame_rate)?;
     let mut owner = MediaOwner {

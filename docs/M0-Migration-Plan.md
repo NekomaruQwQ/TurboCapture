@@ -121,7 +121,7 @@ Configuration and selector code should expose concrete types and functions first
 `capture-windows` is a thin process entry point around one Windows media owner. It owns:
 
 - The process-local Clap argument model and fixed IPv4 loopback listener.
-- Startup validation of the default adapter, exact encoder, OS, and required device features.
+- Automatic selection and startup validation of the preferred GPU, NVIDIA encoder, OS, and required device features.
 - Window enumeration and conversion into `capture-core` observation records.
 - Selector polling and translation of a selected record into a capture target.
 - WGC creation, closure handling, and target replacement.
@@ -210,11 +210,21 @@ The `capture-windows` Clap definition covers only process-generation inputs:
 
 - Path to an initial configuration file.
 - Non-zero loopback port.
-- Exact Media Foundation encoder name.
 
 The process loads and validates its initial configuration before exposing a usable service. It always
-binds IPv4 loopback and creates a device on the default hardware adapter. Port, encoder, and other
-resource-construction settings require process restart to change. Logging is controlled by `RUST_LOG`.
+binds IPv4 loopback. Hardware identifiers are not CLI or configuration inputs. Select adapter index
+zero from `IDXGIFactory6::EnumAdapterByGpuPreference` with `DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`, reject
+software adapters, and create the D3D11 device on that explicit adapter using `D3D_DRIVER_TYPE_UNKNOWN`.
+
+Enumerate hardware NV12-to-H.264 encoders using that adapter's LUID and
+`MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER`. Select the first candidate whose friendly name
+contains `nvidia` (ASCII case-insensitive), preserving Media Foundation's preference order. Validate
+D3D11 awareness and supply the capture device through its DXGI device manager. Log both the adapter
+name/LUID and selected encoder name. An unsuitable preferred adapter, missing NVIDIA match, or failed
+encoder initialization is fatal; no lower-ranked GPU or alternative encoder is tried after selection.
+
+Port and video settings require process restart to change, and hardware selection remains fixed for
+the process lifetime. Driver changes may change selection on restart. Logging is controlled by `RUST_LOG`.
 
 ### 6.2 Live replacement
 
@@ -362,7 +372,7 @@ Exit gate:
 Work:
 
 1. Create the `capture-windows` binary with its process-local Clap definition and fixed loopback listener.
-2. Create and validate the default hardware adapter, D3D11 features, WGC availability, and exact Media Foundation H.264 encoder at startup.
+2. Select and validate DXGI's first high-performance hardware adapter, D3D11 features, WGC availability, and the first NVIDIA hardware H.264 encoder on that adapter at startup.
 3. Move Windows observation from `live-capture` and feed plain fact snapshots into the pure selector.
 4. Move WGC session creation and target switching into the dedicated media thread; remove the hidden winit window and presentation path.
 5. Move crop, fixed-output resampling, reuse/clear semantics, and BGRA-to-NV12 conversion into the same device owner.
@@ -472,6 +482,8 @@ The following scenarios define M0 behavior on the target machine:
 | Viewer reconnects | It receives current render/codec configuration and a fresh IDR |
 | Render parameters change | Canvas processing changes without decoder restart |
 | Unsupported adapter/encoder is observed | Startup fails with the exact violated invariant |
+| Preferred GPU exposes no NVIDIA NV12-to-H.264 encoder | Startup fails with adapter identity and available encoder names; no other GPU is tried |
+| Several NVIDIA encoders match | First match in Media Foundation's preference order is selected; initialization failure is fatal |
 | D3D or encoder fails unrecoverably | Instance exits non-zero; no elaborate internal recovery |
 | Two instances run | Each uses its own port, session, encoder, status, and failure boundary |
 | One instance is killed | Its stream stops; the other instance is unaffected |

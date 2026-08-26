@@ -1,4 +1,4 @@
-//! Default-adapter D3D11 creation and startup capability validation.
+//! High-performance adapter selection, D3D11 creation, and capability validation.
 
 use anyhow::{Context as _, ensure};
 use windows::{
@@ -7,7 +7,7 @@ use windows::{
     Win32::{
         Foundation::{HMODULE, LUID},
         Graphics::{
-            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1},
+            Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1},
             Direct3D11::{
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 D3D11_FORMAT_SUPPORT_RENDER_TARGET, D3D11_FORMAT_SUPPORT_SHADER_SAMPLE,
@@ -18,7 +18,8 @@ use windows::{
             },
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12},
-                IDXGIDevice,
+                CreateDXGIFactory2, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_CREATE_FACTORY_FLAGS,
+                DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IDXGIAdapter1, IDXGIDevice, IDXGIFactory6,
             },
         },
         System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice,
@@ -28,7 +29,7 @@ use windows::{
 
 /// The one D3D11 device/context pair owned by the native media thread.
 pub struct DeviceBundle {
-    /// Device created on the operating system's default hardware adapter.
+    /// Device created on DXGI's first high-performance adapter.
     pub device: ID3D11Device,
     /// Immediate context serialized by the media owner.
     pub context: ID3D11DeviceContext,
@@ -38,17 +39,42 @@ pub struct DeviceBundle {
     pub _winrt_device: IDirect3DDevice,
 }
 
-/// Create the default hardware device and validate every Phase 2 GPU contract.
+/// Create the first high-performance device and validate every GPU contract.
+///
+/// An unsuitable preferred adapter is fatal; lower-ranked adapters are not tried.
 pub fn create_and_validate() -> anyhow::Result<DeviceBundle> {
+    // SAFETY: Factory creation has no caller-owned resources or output pointers.
+    let factory = unsafe { CreateDXGIFactory2::<IDXGIFactory6>(DXGI_CREATE_FACTORY_FLAGS(0)) }
+        .context("failed to create DXGI factory for GPU preference selection")?;
+    // Select once rather than hiding an unsupported machine behind GPU retries.
+    // SAFETY: The live factory returns an owned interface for adapter index zero.
+    let adapter = unsafe {
+        factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE)
+    }.context("failed to select the first high-performance DXGI adapter")?;
+    // SAFETY: The live adapter fills its own descriptor value.
+    let descriptor = unsafe { adapter.GetDesc1() }
+        .context("failed to describe the preferred DXGI adapter")?;
+    let adapter_luid = luid_value(descriptor.AdapterLuid);
+    let name_end = descriptor.Description
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(descriptor.Description.len());
+    let adapter_name = String::from_utf16_lossy(&descriptor.Description[..name_end]);
+    log::info!("selected high-performance adapter 0x{adapter_luid:016X}: {adapter_name}");
+    ensure!(
+        descriptor.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0,
+        "preferred adapter '{adapter_name}' (0x{adapter_luid:016X}) is a software adapter");
+
     let mut device = None;
     let mut context = None;
     let mut feature_level = D3D_FEATURE_LEVEL_11_0;
+    // An explicit adapter requires UNKNOWN; HARDWARE is only for implicit selection.
     // SAFETY: The feature-level slice is valid for the call, and all output
     // pointers address initialized stack options.
     unsafe {
         D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            &adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
             Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
@@ -56,18 +82,12 @@ pub fn create_and_validate() -> anyhow::Result<DeviceBundle> {
             Some(&raw mut device),
             Some(&raw mut feature_level),
             Some(&raw mut context))
-    }.context("failed to create the capture D3D11 device")?;
+    }.with_context(|| format!(
+        "failed to create the capture D3D11 device on '{adapter_name}' (0x{adapter_luid:016X})"))?;
     let device = device.context("D3D11 returned a null device")?;
     let context = context.context("D3D11 returned a null immediate context")?;
     let dxgi_device = device.cast::<IDXGIDevice>()
         .context("D3D11 device does not expose IDXGIDevice")?;
-    // SAFETY: The DXGI device returns its own live adapter interface.
-    let adapter = unsafe { dxgi_device.GetAdapter() }
-        .context("failed to obtain the selected DXGI adapter")?;
-    // SAFETY: `adapter` is live and fills its own descriptor value.
-    let descriptor = unsafe { adapter.GetDesc() }
-        .context("failed to describe the selected DXGI adapter")?;
-    let adapter_luid = luid_value(descriptor.AdapterLuid);
 
     // The capture wrapper can receive callbacks on a system worker. Protection
     // is enabled even though all explicit context use remains media-thread-owned.
@@ -106,13 +126,8 @@ pub fn create_and_validate() -> anyhow::Result<DeviceBundle> {
         .cast::<IDirect3DDevice>()
         .context("WGC interop object does not expose IDirect3DDevice")?;
 
-    let name_end = descriptor.Description
-        .iter()
-        .position(|unit| *unit == 0)
-        .unwrap_or(descriptor.Description.len());
-    let adapter_name = String::from_utf16_lossy(&descriptor.Description[..name_end]);
     log::info!(
-        "validated default adapter 0x{adapter_luid:016X}: {adapter_name} at D3D feature level {feature_level:?}");
+        "validated high-performance adapter 0x{adapter_luid:016X}: {adapter_name} at D3D feature level {feature_level:?}");
     Ok(DeviceBundle {
         device,
         context,
