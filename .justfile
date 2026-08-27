@@ -1,5 +1,9 @@
 set shell := ["nu", "-l", "-c"]
 
+alias c := check
+alias b := build
+alias i := build
+
 # List the supported M0 workflows.
 list:
     just --list

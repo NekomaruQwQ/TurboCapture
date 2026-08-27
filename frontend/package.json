@@ -1,19 +1,19 @@
 {
-  "name": "turbocapture-canvas",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "check": "tsc --noEmit",
-    "build": "vite build",
-    "serve": "vite",
-    "test": "bun test",
-    "lint": "biome check"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "latest",
-    "@types/bun": "latest",
-    "@types/node": "latest",
-    "typescript": "latest",
-    "vite": "latest"
-  }
+    "name": "turbocapture",
+    "type": "module",
+    "private": true,
+    "scripts": {
+        "check": "bun i && tsc --noEmit",
+        "build": "bun i && vite build",
+        "serve": "bun i && vite",
+        "test": "bun i && bun test",
+        "lint": "bun i && biome check"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "latest",
+        "@types/bun": "latest",
+        "@types/node": "latest",
+        "typescript": "latest",
+        "vite": "latest"
+    }
 }
