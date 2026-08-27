@@ -76,6 +76,9 @@ exclude = ["launcher"]
 include = ["game.exe"]
 exclude = []
 
+[source]
+capture_cursor = false
+
 [source.crop]
 min_x = 0
 min_y = 0
@@ -102,12 +105,14 @@ binarization_color = [255, 255, 255]
 substrings; excludes from enabled profiles veto candidates globally. A still-valid current target
 remains sticky, with the foreground preference used when choosing among otherwise eligible candidates.
 
-`source.crop` is optional and uses inclusive minimum/exclusive maximum captured-texture coordinates.
-The native pipeline clamps it to the live texture and aspect-fits it into the fixed opaque output,
-clearing unused pixels. Video width and height must be non-zero, even, and representable as `u16`.
-The H.264 CBR target defaults to `width * height * frame_rate / 4`, prioritizing keyed-edge accuracy
-on the ordinary localhost path. Set optional `video.bit_rate` in bits per second only when a constrained
-link or a measured encoder behavior requires an explicit override.
+`source.capture_cursor` controls whether Windows Graphics Capture includes the mouse cursor and defaults
+to `false`. Changing it live recreates the active WGC session without recreating the encoder.
+`source.crop` is optional and uses inclusive minimum/exclusive maximum captured-texture coordinates. The
+native pipeline clamps it to the live texture and aspect-fits it into the fixed opaque output, clearing
+unused pixels. Video width and height must be non-zero, even, and representable as `u16`. The H.264 CBR
+target defaults to `width * height * frame_rate / 4`, prioritizing keyed-edge accuracy on the ordinary
+localhost path. Set optional `video.bit_rate` in bits per second only when a constrained link or a
+measured encoder behavior requires an explicit override.
 
 `render.default` is used while no profile override applies. Each `render.profiles` key must name a
 defined selection profile, which may currently be disabled. Up to eight sRGB key colors are supported.

@@ -22,7 +22,7 @@ const INFERRED_BIT_RATE_PIXEL_FRAME_DIVISOR: u64 = 4;
 pub struct InstanceConfig {
     /// Policy controlling which observed window owns the stream.
     pub selection: SelectionConfig,
-    /// Source-region processing that may change without recreating the encoder.
+    /// Source capture and processing that may change without recreating the encoder.
     #[serde(default)]
     pub source: SourceConfig,
     /// Fixed encoded output settings that require a process restart to change.
@@ -79,10 +79,13 @@ pub struct SelectionProfileConfig {
     pub exclude: Vec<String>,
 }
 
-/// Source processing that is independent of encoded output geometry.
+/// Source capture and processing that is independent of encoded output geometry.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
+    /// Whether Windows Graphics Capture includes the mouse cursor.
+    #[serde(default)]
+    pub capture_cursor: bool,
     /// Absolute captured-texture rectangle, or the complete texture when absent.
     #[serde(default)]
     pub crop: Option<CropRect>,
@@ -535,6 +538,37 @@ mod tests {
         assert_eq!(
             (config.config().video.bit_rate, config.config().video.target_bit_rate()),
             (None, 31_104_000));
+    }
+
+    #[test]
+    fn configuration_should_disable_cursor_capture_by_default() {
+        let config = toml::from_str::<InstanceConfig>("
+            [selection]
+
+            [video]
+            width = 1920
+            height = 1080
+            frame_rate = 60
+        ").unwrap().validate().unwrap();
+
+        assert!(!config.config().source.capture_cursor);
+    }
+
+    #[test]
+    fn configuration_should_accept_enabled_cursor_capture() {
+        let config = toml::from_str::<InstanceConfig>("
+            [selection]
+
+            [source]
+            capture_cursor = true
+
+            [video]
+            width = 1920
+            height = 1080
+            frame_rate = 60
+        ").unwrap().validate().unwrap();
+
+        assert!(config.config().source.capture_cursor);
     }
 
     #[test]

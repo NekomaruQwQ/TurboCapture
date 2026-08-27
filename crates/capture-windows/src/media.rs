@@ -243,41 +243,22 @@ impl MediaOwner {
             OwnedDecision::Keep { id, profile } => {
                 let selected = find_observation(observations, id)?;
                 let summary = summary(selected, profile);
-                if let Some(current) = self.current_target.as_mut() {
-                    current.summary = summary.clone();
+                let capture_cursor = self.configuration.config.config().source.capture_cursor;
+                let cursor_changed = self.current_target.as_ref()
+                    .is_some_and(|current| current.capture_cursor != capture_cursor);
+                if cursor_changed {
+                    self.start_target_capture(id, selected, summary)?;
+                } else {
+                    if let Some(current) = self.current_target.as_mut() {
+                        current.summary = summary.clone();
+                    }
+                    self.status.transition(CaptureState::Capturing, Some(summary));
                 }
-                self.status.transition(CaptureState::Capturing, Some(summary));
             }
             OwnedDecision::Switch { id, profile } => {
                 let selected = find_observation(observations, id)?;
                 let summary = summary(selected, profile);
-                self.status.transition(CaptureState::Switching, Some(summary.clone()));
-                self.publish_status()?;
-                self.current_target = None;
-                self.last_source = None;
-                self.force_transform = false;
-                self.fixed_frame.clear()?;
-                self.force_keyframe = true;
-                let mut options = CaptureOptions::default();
-                options.capture_cursor = false;
-                match CaptureSession::from_hwnd(&self.device.device, selected.hwnd, &options) {
-                    Ok(session) => {
-                        log::info!(
-                            "capturing profile '{}' from {} ({})",
-                            summary.profile,
-                            summary.executable_name,
-                            summary.title);
-                        self.current_target = Some(CurrentTarget { id, session, summary: summary.clone() });
-                        self.status.transition(CaptureState::Capturing, Some(summary));
-                    }
-                    Err(error) => {
-                        let error = error.context("target disappeared while creating WGC session");
-                        if is_device_lost(&error) {
-                            return Err(error).context("D3D device lost during target switch");
-                        }
-                        self.recover_target("target_open_failed", &error)?;
-                    }
-                }
+                self.start_target_capture(id, selected, summary)?;
             }
             OwnedDecision::Wait => {
                 if self.current_target.take().is_some() {
@@ -290,6 +271,48 @@ impl MediaOwner {
             }
         }
         self.publish_status()
+    }
+
+    /// Replace the WGC session for a selected target using current source settings.
+    fn start_target_capture(
+        &mut self,
+        id: ObservationId,
+        selected: &NativeObservation,
+        summary: TargetSummary) -> anyhow::Result<()> {
+        self.status.transition(CaptureState::Switching, Some(summary.clone()));
+        self.publish_status()?;
+        self.current_target = None;
+        self.last_source = None;
+        self.force_transform = false;
+        self.fixed_frame.clear()?;
+        self.force_keyframe = true;
+        let capture_cursor = self.configuration.config.config().source.capture_cursor;
+        let mut options = CaptureOptions::default();
+        options.capture_cursor = capture_cursor;
+        match CaptureSession::from_hwnd(&self.device.device, selected.hwnd, &options) {
+            Ok(session) => {
+                log::info!(
+                    "capturing profile '{}' from {} ({})",
+                    summary.profile,
+                    summary.executable_name,
+                    summary.title);
+                self.current_target = Some(CurrentTarget {
+                    id,
+                    session,
+                    summary: summary.clone(),
+                    capture_cursor,
+                });
+                self.status.transition(CaptureState::Capturing, Some(summary));
+            }
+            Err(error) => {
+                let error = error.context("target disappeared while creating WGC session");
+                if is_device_lost(&error) {
+                    return Err(error).context("D3D device lost during target switch");
+                }
+                self.recover_target("target_open_failed", &error)?;
+            }
+        }
+        Ok(())
     }
 
     /// Drain WGC's two-frame pool and render only its newest complete frame.
@@ -398,6 +421,8 @@ struct CurrentTarget {
     id: ObservationId,
     session: CaptureSession,
     summary: TargetSummary,
+    /// Cursor-capture setting applied when this WGC session was created.
+    capture_cursor: bool,
 }
 
 /// Last complete WGC source retained for crop-only configuration updates.
