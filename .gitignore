@@ -1,7 +1,5 @@
 node_modules/
 target/
+generated/
+dist/
 data/
-frontend/dist/
-
-.claude
-.claude-project

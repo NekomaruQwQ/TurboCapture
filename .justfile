@@ -4,43 +4,27 @@ set shell := ["nu", "-l", "-c"]
 list:
     just --list
 
-# Build the complete two-crate Rust workspace.
-build:
-    cargo build --release --workspace --locked
+# Compile the fixed-frame shaders consumed by capture-windows.
+shaders:
+    cmd.exe /d /c crates\capture-windows\compile_fixed_frame_shaders.bat
+
+# Build the Rust backend and the frontend renderer.
+build: shaders
+    cargo b -r
+    cd frontend; bun run build
+
+# Run the localhost canvas renderer on the requested port.
+serve port:
+    $env.LIVE_VITE_PORT = "{{port}}"; \
+    cd frontend; bun run serve
 
 # Run the Windows capture server, forwarding its startup arguments.
-capture *args:
-    cargo run --release --locked -p capture-windows -- {{args}}
-
-# Run the localhost canvas viewer on the requested port.
-viewer port="4173":
-    $env.LIVE_VITE_PORT = "{{port}}"; cd frontend; bun run dev
-
-# Run the Rust workspace tests.
-test:
-    cargo test --release --workspace --all-features --locked
-
-# Reject all Rust workspace lint warnings.
-clippy:
-    cargo clippy --release --workspace --all-targets --all-features --locked -- -D warnings
+capture *args: shaders
+    cargo run -r -p capture-windows -- {{args}}
 
 # Run every frontend validation before serving the viewer.
-frontend-check:
+check-frontend:
     cd frontend; bun test
     cd frontend; bun run check
     cd frontend; bun run lint
     cd frontend; bun run build
-
-# Run an arbitrary Bun command inside the frontend project.
-bun *args:
-    cd frontend; bun {{args}}
-
-# Move a bookmark to a revision and publish it.
-push bookmark="dev" revision="@-":
-    jj bookmark move {{bookmark}} --to={{revision}}
-    jj git push --all
-
-# Fetch a bookmark and start a new working copy from its remote revision.
-pull bookmark="dev":
-    jj git fetch
-    jj new -r {{bookmark}}@origin

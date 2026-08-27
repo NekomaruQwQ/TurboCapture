@@ -47,15 +47,16 @@ M0 intentionally assumes:
 
 - Windows 11 on the current livestreaming machine.
 - DXGI's first high-performance adapter and an NVIDIA hardware H.264 transform on that adapter.
-- Windows Graphics Capture, D3D11 video processing, NV12 surfaces, and the Windows SDK `fxc.exe`.
+- Windows Graphics Capture, D3D11 video processing, NV12 surfaces, and the Windows SDK `fxc.exe` on
+  the Nushell login `PATH`.
 - A current Rust toolchain and Cargo.
 - Bun for the frontend; Nushell and `just` for the repository recipes.
 - A Chromium-family browser with WebCodecs and WebGL2.
 - A loopback capture endpoint as seen by the browser, either local or SSH-forwarded.
 
-The Cargo build script first honors an `FXC` environment override, then searches `PATH`, then uses the
-newest installed Windows 10/11 SDK. It emits shader bytecode into Cargo's `OUT_DIR`; generated `.fxo`
-files do not belong in the source tree.
+The `just shaders` recipe runs `compile_fixed_frame_shaders.bat`, which calls `fxc.exe` from the
+Nushell login `PATH` and emits ignored shader bytecode into `crates/capture-windows/generated`.
+Recipes that build or run `capture-windows` compile the shaders first.
 
 ## Instance configuration
 
@@ -236,6 +237,7 @@ The maintained recipes are intentionally small:
 | Recipe | Action |
 | --- | --- |
 | `just build` | Release-build the locked Rust workspace, including shaders |
+| `just shaders` | Compile the fixed-frame shaders with FXC |
 | `just capture [args]` | Run one release `capture-windows` instance |
 | `just viewer [port]` | Run the localhost Vite viewer; the default is `4173` |
 | `just test` | Run all release Rust tests with all features |
@@ -244,8 +246,8 @@ The maintained recipes are intentionally small:
 | `just bun [args]` | Run an arbitrary Bun command in `frontend` |
 | `just push`, `just pull` | Explicit jj/Git synchronization helpers |
 
-Cargo commands are always run with `--release`; repository formatting is manual. Useful direct checks
-are:
+Cargo commands are always run with `--release`; repository formatting is manual. Run `just shaders`
+at least once after checkout and after changing the HLSL source, then useful direct checks are:
 
 ```console
 cargo build --release --workspace --locked

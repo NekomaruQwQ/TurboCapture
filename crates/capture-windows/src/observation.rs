@@ -8,20 +8,14 @@ use std::{
     process,
 };
 
-use capture_core::{ObservationId, ObservedWindow, WindowBounds};
+use capture_core::*;
 use windows::Win32::{
-    Foundation::{CloseHandle, HWND, LPARAM, RECT, TRUE},
+    Foundation::*,
     Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
-    System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    },
-    UI::WindowsAndMessaging::{
-        EnumWindows, GW_OWNER, GetClientRect, GetForegroundWindow, GetWindow,
-        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    },
+    System::Threading::*,
+    UI::WindowsAndMessaging::*,
 };
-use windows_core::{BOOL, PWSTR};
+use windows::core::{BOOL, PWSTR};
 
 /// Native values collected together before translation into selector facts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

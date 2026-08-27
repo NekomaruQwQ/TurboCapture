@@ -10,8 +10,9 @@ authenticated, TLS-enabled, or intended for an untrusted network.
 
 ## Start one stream
 
-Requirements: current Rust, Windows 11 and its SDK (`fxc.exe`), Bun, Nushell, `just`, a Chromium
-browser with WebCodecs/WebGL2, and an NVIDIA hardware H.264 encoder on the preferred GPU.
+Requirements: current Rust, Windows 11 and its SDK (`fxc.exe` on the Nushell login `PATH`), Bun,
+Nushell, `just`, a Chromium browser with WebCodecs/WebGL2, and an NVIDIA hardware H.264 encoder on
+the preferred GPU.
 
 Create an ignored local configuration such as `data/minecraft.toml`:
 

@@ -18,6 +18,7 @@ pretty_env_logger = { workspace = true }
 tokio = { workspace = true }
 winrt-capture = { workspace = true }
 
+windows-core = { workspace = true } # required for the `windows::core::implement` macro
 windows = { workspace = true, features = [
     "Foundation",
     "Graphics_Capture",
@@ -36,5 +37,3 @@ windows = { workspace = true, features = [
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# `windows::core::implement` expands through this companion crate by name.
-windows-core = "0.62.2"

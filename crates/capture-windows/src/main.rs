@@ -1,6 +1,5 @@
 //! One-process Windows capture and H.264 host for TurboCapture M0.
 
-mod args;
 mod device;
 mod encoder;
 mod frame;
@@ -11,45 +10,52 @@ mod observation;
 use std::{
     future::IntoFuture as _,
     net::{Ipv4Addr, SocketAddr},
-    process::ExitCode,
 };
 
 use anyhow::Context as _;
 use capture_core::{
     ChannelCapacities, InstanceService, MediaCompletion, load_config,
 };
-use clap::Parser as _;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 
-use crate::args::CaptureArgs;
+use std::num::NonZero;
+use std::path::PathBuf;
 
-/// Parse startup identity, run one instance, and preserve a non-zero fatal exit.
-fn main() -> ExitCode {
-    let args = CaptureArgs::parse();
-    if let Err(error) = pretty_env_logger::try_init() {
-        eprintln!("fatal: failed to initialize logging: {error}");
-        return ExitCode::FAILURE;
-    }
-    match run(args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            log::error!("fatal: {error:#}");
-            ExitCode::FAILURE
-        }
-    }
+use clap::Parser;
+
+/// Startup arguments consumed by one `capture-windows` process.
+///
+/// The listener is fixed to IPv4 loopback and its port requires process restart
+/// to change. GPU and encoder selection follow the internal hardware policy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Parser)]
+#[command(name = "capture-windows", about = "Capture and serve one Windows video stream")]
+pub struct CaptureArgs {
+    /// Initial complete instance configuration in TOML format.
+    #[arg(long, short = 'c', env = "CAPTURE_CONFIG", value_name = "FILE")]
+    pub config: PathBuf,
+
+    /// Non-zero TCP port for the viewer to connect to.
+    #[arg(long, short = 'p', env = "CAPTURE_PORT", value_name = "PORT")]
+    pub port: NonZero<u16>,
 }
 
-/// Establish DPI/config/service state before starting the native owner.
-fn run(args: CaptureArgs) -> anyhow::Result<()> {
+/// Parse startup identity, run one instance, and preserve a non-zero fatal exit.
+fn main() -> anyhow::Result<()> {
+    pretty_env_logger::init();
+
     enable_per_monitor_dpi_awareness()
         .context("failed to enable per-monitor-v2 DPI awareness")?;
+
+    let args = CaptureArgs::parse();
     let config = load_config(&args.config)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create capture-core runtime")?;
+    let runtime =
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to create capture-core runtime")?;
     runtime.block_on(run_instance(args, config))
 }
 

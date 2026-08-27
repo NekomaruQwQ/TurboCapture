@@ -226,22 +226,22 @@ struct Resampler {
 
 impl Resampler {
     /// Compiled vertex shader produced by the repository shader recipe.
-    const VERTEX_BYTECODE: &'static [u8] = include_bytes!(concat!(
-        env!("OUT_DIR"), "/fixed_frame_vs_main.fxo"));
+    const VERTEX_BYTECODE: &'static [u8] =
+        include_bytes!("../generated/fixed_frame_vs_main.fxo");
     /// Compiled pixel shader produced by the repository shader recipe.
-    const PIXEL_BYTECODE: &'static [u8] = include_bytes!(concat!(
-        env!("OUT_DIR"), "/fixed_frame_ps_main.fxo"));
+    const PIXEL_BYTECODE: &'static [u8] =
+        include_bytes!("../generated/fixed_frame_ps_main.fxo");
 
     /// Create immutable pipeline objects on the fixed-frame device.
     fn new(device: &ID3D11Device) -> anyhow::Result<Self> {
         let mut vertex_shader = None;
-        // SAFETY: Bytecode comes from the checked-in HLSL manifest entry.
+        // SAFETY: Bytecode comes from the repository's fixed-frame HLSL source.
         unsafe { device.CreateVertexShader(Self::VERTEX_BYTECODE, None, Some(&raw mut vertex_shader)) }
             .context("failed to create fixed-frame vertex shader")?;
         let vertex_shader = vertex_shader.context("D3D11 returned a null vertex shader")?;
 
         let mut pixel_shader = None;
-        // SAFETY: Bytecode comes from the checked-in HLSL manifest entry.
+        // SAFETY: Bytecode comes from the repository's fixed-frame HLSL source.
         unsafe { device.CreatePixelShader(Self::PIXEL_BYTECODE, None, Some(&raw mut pixel_shader)) }
             .context("failed to create fixed-frame pixel shader")?;
         let pixel_shader = pixel_shader.context("D3D11 returned a null pixel shader")?;
