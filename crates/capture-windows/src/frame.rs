@@ -7,9 +7,15 @@ use capture_core::CropRect;
 use euclid::default::Size2D;
 use windows::{
     Win32::Graphics::{
-        Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+        Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2D},
         Direct3D11::*,
-        Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC},
+        Dxgi::Common::{
+            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_NV12,
+            DXGI_SAMPLE_DESC,
+        },
     },
     core::Interface as _,
 };
@@ -18,6 +24,33 @@ use windows::{
 const CLEAR_COLOR: [f32; 4] = [41.0 / 255.0, 41.0 / 255.0, 41.0 / 255.0, 1.0];
 /// Three surfaces allow an async encoder to retain inputs without aliasing.
 const SURFACE_COUNT: usize = 3;
+
+/// View gamma-encoded WGC bytes without applying the sRGB sampling transform.
+///
+/// WGC exposes display-encoded bytes in a UNORM texture. Sampling the wrapper's
+/// sRGB staging view would decode those bytes to linear light, while the fixed
+/// UNORM render target stores shader output verbatim for Media Foundation.
+/// Keeping this view UNORM therefore preserves the screen's encoded RGB values.
+pub fn create_gamma_encoded_source_view(
+    device: &ID3D11Device,
+    texture: &ID3D11Texture2D) -> anyhow::Result<ID3D11ShaderResourceView> {
+    let description = D3D11_SHADER_RESOURCE_VIEW_DESC {
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
+        Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+            Texture2D: D3D11_TEX2D_SRV { MostDetailedMip: 0, MipLevels: 1 },
+        },
+    };
+    let mut view = None;
+    // SAFETY: WGC guarantees a single-mip BGRA UNORM texture on `device`.
+    unsafe {
+        device.CreateShaderResourceView(
+            texture,
+            Some(&raw const description),
+            Some(&raw mut view))
+    }.context("failed to create gamma-encoded WGC source view")?;
+    view.context("D3D11 returned a null WGC source view")
+}
 
 /// GPU-owned fixed BGRA image whose media type survives target switches.
 pub struct FixedFrame {
@@ -306,6 +339,8 @@ impl Nv12Pool {
             .context("failed to query D3D11 video device")?;
         let video_context = context.cast::<ID3D11VideoContext>()
             .context("failed to query D3D11 video context")?;
+        let video_context_1 = context.cast::<ID3D11VideoContext1>()
+            .context("failed to query color-space-aware D3D11 video context")?;
         let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputFrameRate: windows::Win32::Graphics::Dxgi::Common::DXGI_RATIONAL { Numerator: 1, Denominator: 1 },
@@ -322,6 +357,21 @@ impl Nv12Pool {
         // SAFETY: Conversion uses the first supported rate-conversion capability.
         let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0) }
             .context("failed to create BGRA-to-NV12 processor")?;
+        // The source contains display-encoded full-range RGB. Emit studio-range
+        // BT.709 NV12 so H.264 decoders apply the inverse transform consistently.
+        // SAFETY: The processor and versioned immediate context share `device`.
+        unsafe {
+            video_context_1.VideoProcessorSetStreamColorSpace1(
+                &processor,
+                0,
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        }
+        // SAFETY: The processor and versioned immediate context share `device`.
+        unsafe {
+            video_context_1.VideoProcessorSetOutputColorSpace1(
+                &processor,
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+        }
 
         let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,

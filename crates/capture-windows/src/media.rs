@@ -29,7 +29,7 @@ use winrt_capture::{CaptureOptions, CaptureSession};
 use crate::{
     device::{self, DeviceBundle},
     encoder::{EncoderEvent, H264Encoder, MediaFoundation, SurfaceReleaseTracker},
-    frame::{FixedFrame, Nv12Pool},
+    frame::{FixedFrame, Nv12Pool, create_gamma_encoded_source_view},
     h264::H264Packetizer,
     observation::{NativeObservation, observe_windows},
 };
@@ -308,9 +308,12 @@ impl MediaOwner {
         match target.session.get_next_frame(&self.device.context) {
             Ok(Some(frame)) => {
                 let crop = self.configuration.config.config().source.crop;
-                self.fixed_frame.update(&frame.texture_view, frame.size, crop)?;
+                let source_view = create_gamma_encoded_source_view(
+                    &self.device.device,
+                    &frame.raw_texture)?;
+                self.fixed_frame.update(&source_view, frame.size, crop)?;
                 self.last_source = Some(SourceFrame {
-                    view: frame.texture_view,
+                    view: source_view,
                     size: frame.size,
                 });
                 self.force_transform = false;

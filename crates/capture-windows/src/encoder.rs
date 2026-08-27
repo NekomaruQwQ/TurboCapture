@@ -466,7 +466,7 @@ fn find_media_type(
     anyhow::bail!("selected encoder does not expose required media subtype {subtype:?}")
 }
 
-/// Apply immutable geometry and cadence to an enumerated video media type.
+/// Apply immutable SDR color, geometry, and cadence to an enumerated video media type.
 #[expect(clippy::multiple_unsafe_ops_per_block, reason = "one ordered MF attribute transaction")]
 fn configure_common_video_type(
     media_type: &IMFMediaType,
@@ -477,7 +477,11 @@ fn configure_common_video_type(
     unsafe {
         media_type.SetUINT64(&MF_MT_FRAME_SIZE, frame_size)?;
         media_type.SetUINT64(&MF_MT_FRAME_RATE, frame_rate)?;
-        media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)
+        media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)?;
+        media_type.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_sRGB.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)
     }.context("failed to configure fixed encoder media type")?;
     Ok(())
 }
