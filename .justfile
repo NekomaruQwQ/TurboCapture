@@ -23,7 +23,7 @@ build: compile-shaders
 # Serve the frontend renderer on the configured port via http-server.
 serve:
     cd frontend; bun run build
-    cd frontend; http-server --port $env.TURBOCAPTURE_PORT
+    cd frontend/dist; http-server --port $env.TURBOCAPTURE_PORT
 
 # Serve the frontend renderer on the configured port via vite.
 dev:
