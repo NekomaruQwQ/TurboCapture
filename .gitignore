@@ -1,5 +1,10 @@
+# @human-maintained
+
+# build artifacts
 node_modules/
+dist/
 target/
 generated/
-dist/
+
+# local test data
 data/

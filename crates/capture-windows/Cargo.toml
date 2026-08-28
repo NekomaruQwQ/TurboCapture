@@ -16,7 +16,7 @@ euclid = "0.22.14"
 log = "0.4.34"
 pretty_env_logger = "0.5.0"
 tokio = { workspace = true }
-winrt-capture = { git = "https://github.com/NekomaruQwQ/Nekomaru-Rust.git", rev = "a32a1560" }
+winrt-capture = { git = "https://github.com/NekomaruQwQ/Nekomaru-Rust.git", rev = "42b84a93" }
 
 windows-core = "0.62.2" # required for the `windows::core::implement` macro
 windows = { version = "0.62.2", features = [
