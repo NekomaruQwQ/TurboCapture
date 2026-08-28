@@ -10,8 +10,8 @@ M0 turns the forked combined LiveUI repository into a focused TurboCapture repos
 
 1. Select a Windows capture target using pure, deterministic policy.
 2. Capture, crop/resample, and H.264-encode that target inside one `capture-windows` process.
-3. Serve instance status, configuration, render configuration, and opaque video directly from that process.
-4. Decode the video and perform transparency-producing post-processing in a browser canvas.
+3. Serve instance status, configuration, target availability, and opaque video directly from that process.
+4. Decode the video and perform transparency-producing post-processing in a browser canvas using URL-owned render parameters.
 5. Run several independent streams by starting several independent processes.
 
 M0 begins TurboCapture's own milestone sequence. It is not “LiveUI M5,” and it does not complete or preserve the LiveUI side of the former split plan.
@@ -65,8 +65,8 @@ flowchart LR
     control -->|"spawn / kill"| instance_b
     control <-->|"REST only"| core_a
     control <-->|"REST only"| core_b
-    core_a -->|"local or port-forwarded WebSocket + render config"| viewer
-    core_b -->|"local or port-forwarded WebSocket + render config"| viewer
+    core_a -->|"local or port-forwarded WebSocket + stream state"| viewer
+    core_b -->|"local or port-forwarded WebSocket + stream state"| viewer
 ```
 
 There is no central server in the video path. A browser connects to the particular instance it wants to display through a localhost port; an instance on another machine is first port-forwarded onto that loopback interface. Multiple instances are identical except for their startup configuration, port, and selected target policy.
@@ -101,7 +101,7 @@ capture-windows -> capture-core
 - Pure selector ranking, filtering, stickiness, and deterministic tie-breaking.
 - Status and error representations exposed by one instance.
 - Private video packet and codec-configuration types needed by Rust and the viewer protocol.
-- Browser render-configuration data.
+- Viewer target-availability notifications; render parameters belong to the viewer URL.
 - Video subscriber fan-out and decoder-start synchronization.
 - The Axum router, REST handlers, and video WebSocket handler.
 - Narrow channel-facing interfaces through which a platform host supplies media status and encoded packets.
@@ -155,7 +155,7 @@ The process main thread runs Tokio and Axum. This domain owns:
 - TCP listening, HTTP requests, WebSocket connections, and viewer counts.
 - The active validated configuration snapshot exposed through REST.
 - Status snapshots received from the media owner.
-- Codec configuration and render-configuration snapshots.
+- Codec configuration and target-availability snapshots.
 - Encoded-packet fan-out to viewers.
 - Viewer lag detection and reconnect behavior.
 - Observation of the media thread's terminal result.
@@ -236,8 +236,9 @@ The REST surface uses complete replacement semantics:
 - A valid candidate atomically becomes the next generation.
 - An invalid candidate returns a structured client error and does not mutate the active generation.
 
-Policy rules and browser render parameters are expected to update live. A change requiring device,
-output media type, port, or encoder reconstruction may be rejected as restart-required in M0 rather
+Policy rules update live through the instance API; browser render parameters update locally through
+each viewer URL. A change requiring device, output media type, port, or encoder reconstruction may be
+rejected as restart-required in M0 rather
 than hidden behind a complicated live transition.
 
 ### 6.3 Selection inputs and purity
@@ -282,17 +283,19 @@ M0 keeps the useful existing WebCodecs path:
 
 - H.264 is transported as AVCC access units with an explicit keyframe flag and timestamp.
 - Decoder configuration carries output dimensions, SPS, and PPS or an equivalent `avcC` description.
-- Browser render configuration is sent as a distinct JSON message on the same viewer connection.
+- Target availability is sent as a distinct `stream_state` JSON message on the viewer connection; shader parameters are never sent by the capture instance.
 - Encoded pictures are opaque. No alpha plane, packed alpha region, or second synchronized stream exists.
 
 On viewer connection or decoder discontinuity, the server requests a fresh IDR from the media owner and does not forward dependent pictures to that viewer until the IDR arrives. This is simpler and more correct than sending one cached old keyframe followed by frames that may depend on omitted references. The personal-use viewer count makes the extra keyframe acceptable.
 
-A codec reinitialization sends new decoder configuration before the first keyframe of the new generation. A render-only configuration change sends a new render-configuration message without restarting the decoder.
+A codec reinitialization sends new decoder configuration before the first keyframe of the new
+generation. A render-only URL change updates shader uniforms locally without restarting the decoder
+or reconnecting the WebSocket.
 
 ### 7.3 Network behavior
 
 - The native listener is fixed to IPv4 loopback on its host.
-- The browser accepts only a capture port and always connects to `ws://127.0.0.1:<port>/api/video`.
+- The browser accepts only a capture port for endpoint selection and always connects to `ws://127.0.0.1:<port>/api/video`; render parameters remain local.
 - A capture instance on another machine is exposed through operator-managed local port forwarding rather than direct browser LAN access.
 - Cross-origin access between the two localhost ports is allowed for the configured trusted workflow.
 - Viewer disconnect is ordinary and does not alter capture.
@@ -304,12 +307,12 @@ A codec reinitialization sends new decoder configuration before the first keyfra
 
 The frontend is a small independently hosted viewer, not a control surface. It:
 
-- Receives a capture port through the exact `#/canvas?port=<port>` client-side route.
+- Receives a capture port and optional `key_colors`, `color_key_knee`, and `binarization_color` parameters through the `#/canvas` hash route.
 - Derives the fixed `ws://127.0.0.1:<port>/api/video` endpoint without accepting an arbitrary host or protocol.
 - Connects to that instance's private video WebSocket.
 - Configures WebCodecs from the received codec data.
 - Uploads decoded opaque frames to WebGL.
-- Applies the existing browser-side color-key/transparency pipeline using received render configuration.
+- Applies the existing browser-side color-key/transparency pipeline using validated URL parameters and frontend defaults.
 - Draws only the resulting canvas and produces no visible error chrome in livestream output.
 - Logs diagnostics for development and reconnects after instance or network interruption.
 
@@ -405,7 +408,7 @@ Work:
 1. Construct `capture-core` API state around the media thread's bounded channels.
 2. Bind the configured port on IPv4 loopback and serve the platform-independent Axum router from `capture-windows`.
 3. Expose status and full configuration replacement over REST.
-4. Stream render configuration, decoder configuration, timestamps, keyframe flags, and AVCC access units over the viewer WebSocket.
+4. Stream target availability, decoder configuration, timestamps, keyframe flags, and AVCC access units over the viewer WebSocket.
 5. Implement viewer counting, fresh-IDR startup, lag disconnect, and bounded reconnect behavior.
 6. Allow the required trusted cross-origin viewer access.
 7. Verify two instances can bind distinct ports, select different policies, and fail independently.
@@ -425,7 +428,7 @@ Work:
 
 1. Reduce the existing frontend to endpoint configuration, private video transport, WebCodecs decode, and WebGL canvas rendering.
 2. Retain and verify the existing browser color-key logic instead of moving it into the native encoder.
-3. Apply render-configuration changes independently of decoder configuration.
+3. Apply URL-owned render changes independently of decoder configuration and transport lifetime.
 4. Remove audio, KPM, strings, widgets, tokens, marquees, Svelte control UI, and webview-specific integration.
 5. Provide a neutral/transparent visual state while waiting or reconnecting; keep diagnostics in developer logging.
 6. Verify same-machine and port-forwarded LiveUI/OBS embedding paths using explicit localhost ports.
@@ -479,8 +482,8 @@ The following scenarios define M0 behavior on the target machine:
 | Policy selects a different target | WGC session changes while output stream identity remains the process endpoint |
 | Viewer connects late | Server forces a new IDR; decode begins at a valid boundary |
 | Viewer cannot keep up | Only that viewer disconnects; capture continues |
-| Viewer reconnects | It receives current render/codec configuration and a fresh IDR |
-| Render parameters change | Canvas processing changes without decoder restart |
+| Viewer reconnects | It receives current target availability, codec configuration, and a fresh IDR; URL-owned presentation is retained |
+| URL render parameters change | Canvas processing changes without decoder restart or WebSocket reconnection |
 | Unsupported adapter/encoder is observed | Startup fails with the exact violated invariant |
 | Preferred GPU exposes no NVIDIA NV12-to-H.264 encoder | Startup fails with adapter identity and available encoder names; no other GPU is tried |
 | Several NVIDIA encoders match | First match in Media Foundation's preference order is selected; initialization failure is fatal |

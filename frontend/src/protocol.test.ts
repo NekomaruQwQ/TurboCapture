@@ -2,30 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { parseViewerBinaryMessage, parseViewerControlMessage } from "./protocol";
 
 describe("viewer control protocol", () => {
-  test("parses render configuration into shader-ready names", () => {
+  test.each(["desktop", null])("parses active and missing targets: %s", (profile) => {
     const message = parseViewerControlMessage(JSON.stringify({
-      type: "render_configuration",
-      configuration_generation: 7,
-      profile: "desktop",
-      render: {
-        key_colors: [[0, 255, 0]],
-        color_key_knee: { low: 0.02, high: 0.98 },
-        binarization_color: [255, 255, 255],
-      },
+      type: "stream_state",
+      profile,
     }));
 
     expect(message).toEqual({
-      type: "render_configuration",
-      configuration: {
-        configurationGeneration: 7,
-        profile: "desktop",
-        render: {
-          keyColors: [[0, 255, 0]],
-          kneeLow: 0.02,
-          kneeHigh: 0.98,
-          binarizationColor: [255, 255, 255],
-        },
-      },
+      type: "stream_state",
+      state: { profile },
     });
   });
 
@@ -38,6 +23,10 @@ describe("viewer control protocol", () => {
     "not-json",
     '{"type":"unknown"}',
     '{"type":"error","code":"capture"}',
+    '{"type":"stream_state"}',
+    '{"type":"stream_state","profile":false}',
+    '{"type":"stream_state","profile":""}',
+    '{"type":"stream_state","profile":null,"render":{}}',
     '{"type":"render_configuration","configuration_generation":1,"profile":null,"render":{"key_colors":[],"color_key_knee":{"low":1,"high":0},"binarization_color":null}}',
   ])("rejects malformed control input %s", (message) => {
     expect(() => parseViewerControlMessage(message)).toThrow();

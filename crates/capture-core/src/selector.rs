@@ -314,8 +314,7 @@ fn normalize(value: &str) -> String { value.replace('\\', "/").to_lowercase() }
 #[cfg(test)]
 mod tests {
     use crate::config::{
-        InstanceConfig, RenderProfiles, SelectionProfileConfig, SourceConfig,
-        VideoConfig,
+        InstanceConfig, SelectionProfileConfig, SourceConfig, VideoConfig,
     };
 
     use super::*;
@@ -344,7 +343,6 @@ mod tests {
                 frame_rate: 60,
                 bit_rate: None,
             },
-            render: RenderProfiles::default(),
         }
         .validate()
         .unwrap()

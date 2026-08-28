@@ -143,7 +143,9 @@ Transparency-producing presentation work remains in the browser canvas, as in th
 - Unspill or other operations whose result requires transparency.
 - Composition into the final transparent canvas consumed by LiveUI or OBS.
 
-The capture instance sends the viewer the render configuration needed for those operations. This configuration is private to TurboCapture and may evolve together with the viewer.
+The viewer URL owns the render parameters needed for those operations, alongside its capture port.
+Each viewer has independent presentation settings; the capture instance neither stores nor sends
+shader parameters. Render-only URL changes update the existing renderer without restarting decoding.
 
 This boundary deliberately removes side-by-side color/alpha packing, dual-stream alpha synchronization, unusual coded dimensions, and native alpha reconstruction from M0.
 
@@ -151,7 +153,10 @@ This boundary deliberately removes side-by-side color/alpha packing, dual-stream
 
 Each `capture-windows` instance serves its own REST status/configuration surface and video WebSocket. There is no relay, aggregation server, stdout media protocol, shared cross-process texture, or service-discovery layer in the media path.
 
-The control surface uses REST only. The viewer connects to the selected capture instance's localhost or locally forwarded port for video and render configuration. The hash route identifies that instance by port; M0 does not require arbitrary viewer hosts, globally stable stream IDs, or dynamic discovery.
+The control surface uses REST only. The viewer connects to the selected capture instance's localhost
+or locally forwarded port for video and target-availability notifications. The hash route identifies
+that instance by port and supplies local render parameters; M0 does not require arbitrary viewer hosts,
+globally stable stream IDs, or dynamic discovery.
 
 The protocol is private and versioned only as needed to keep the repository's native and browser code coherent. Backward compatibility across revisions is not a requirement.
 
@@ -162,7 +167,10 @@ Configuration updates are complete replacements, not partially applied patches. 
 Settings fall into two categories:
 
 - Startup settings, such as port and video output settings, take effect by restarting the process. Automatic hardware selection is fixed for that process lifetime.
-- Live settings, such as selection rules, crop, output geometry where supported, and browser render parameters, may be replaced while the process runs.
+- Live native settings, such as selection rules and crop, may be replaced through the instance API while the process runs.
+
+Browser render parameters are separate from native configuration. They are validated from each
+viewer's URL, reset to frontend defaults when omitted, and do not follow selection-profile changes.
 
 M0 distinguishes expected runtime conditions from broken invariants:
 

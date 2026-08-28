@@ -89,15 +89,6 @@ max_y = 1080
 width = 1920
 height = 1080
 frame_rate = 60
-
-[render.default]
-key_colors = [[0, 255, 0]]
-color_key_knee = { low = 0.02, high = 0.98 }
-
-[render.profiles.minecraft]
-key_colors = [[0, 255, 0], [1, 254, 1]]
-color_key_knee = { low = 0.01, high = 0.20 }
-binarization_color = [255, 255, 255]
 ```
 
 `selection.enabled` lists active profiles in priority order. Definitions may remain in
@@ -114,11 +105,9 @@ target defaults to `width * height * frame_rate / 4`, prioritizing keyed-edge ac
 localhost path. Set optional `video.bit_rate` in bits per second only when a constrained link or a
 measured encoder behavior requires an explicit override.
 
-`render.default` is used while no profile override applies. Each `render.profiles` key must name a
-defined selection profile, which may currently be disabled. Up to eight sRGB key colors are supported.
-The knee must satisfy
-`0 <= low < high <= 1`; `binarization_color` optionally replaces foreground RGB while retaining the
-computed alpha.
+Browser render settings belong solely to each viewer URL; neither TOML nor `PUT /api/config` accepts
+a `render` field. Remove any old `[render.default]` or `[render.profiles.*]` sections and move their
+values into viewer URLs. Selection profiles no longer change presentation settings automatically.
 
 ## Running and viewing
 
@@ -158,7 +147,7 @@ Start the viewer on its own local port:
 just viewer 4173
 ```
 
-The only accepted viewer route is:
+The viewer accepts the `/canvas` hash route with a required capture port and optional render settings:
 
 ```text
 http://127.0.0.1:<viewer-port>/#/canvas?port=<capture-port>
@@ -178,9 +167,37 @@ Embed the same route directly:
 ></iframe>
 ```
 
-The viewer reconnects with bounded exponential backoff. Each connection receives current render
-parameters and begins decoding only from a fresh keyframe, so restart and target-switch recovery do
-not display stale frames.
+The viewer reconnects with bounded exponential backoff. Each connection receives current target
+availability and begins decoding only from a fresh keyframe, so restart and target-switch recovery do
+not display stale frames. Render settings remain local to the viewer across reconnections.
+
+### Viewer render parameters
+
+Each optional parameter occurs at most once in the hash query, alongside `port`:
+
+| Parameter | Format | Default when omitted |
+| --- | --- | --- |
+| `key_colors` | One to eight comma-separated six-digit sRGB hex colors, without `#` | No keying (opaque passthrough) |
+| `color_key_knee` | Two comma-separated finite decimal numbers satisfying `0 <= low < high <= 1` | `0.02,0.98` |
+| `binarization_color` | One six-digit sRGB hex color replacing foreground RGB while preserving alpha | Normal foreground RGB/unspill |
+
+For example, remove two green colors, tighten the alpha knee, and tint the foreground white:
+
+```text
+http://127.0.0.1:4173/#/canvas?port=48100&key_colors=00ff00,01fe01&color_key_knee=0.01,0.20&binarization_color=ffffff
+```
+
+Hex colors are case-insensitive; decimal exponent notation is accepted for knees. Knee edges must
+remain distinct after conversion to shader float precision. Ordinary URL percent-encoding is accepted,
+including `%2C` for commas. Empty values, invalid colors or knees,
+duplicate parameters, and unknown parameters reject the whole route, disconnect any previous stream,
+and leave a transparent canvas with a console diagnostic. Remove a parameter instead of making it
+empty to restore its default.
+
+Render-only hash changes update shader uniforms for subsequent frames without clearing the canvas,
+reconnecting the WebSocket, or resetting the decoder. Changing the capture port replaces the stream.
+Two viewers can render the same capture stream differently without modifying native configuration or
+each other. The hash parameters are never sent to the viewer host or capture server.
 
 ### Remote capture
 
@@ -202,8 +219,8 @@ Every capture process owns these routes on its fixed loopback address:
 | `GET` | `/api/status` | Current generation, lifecycle state, target summary, rates, counters, and viewers |
 | `GET` | `/api/config` | Active canonical configuration and its generation |
 | `PUT` | `/api/config` | Validate and atomically replace one complete JSON configuration |
-| `GET` | `/api/initialization` | Current render settings and optional WebCodecs decoder initialization |
-| `GET` upgrade | `/api/video` | Render-control messages plus binary H.264 codec/access-unit events |
+| `GET` | `/api/initialization` | Configuration generation and optional WebCodecs decoder initialization |
+| `GET` upgrade | `/api/video` | Stream-state/error messages plus binary H.264 codec/access-unit events |
 
 For example:
 
@@ -217,9 +234,13 @@ response wrapper. It validates the candidate before publishing a new monotonic g
 JSON or configuration returns a structured client error and preserves the last valid generation.
 Changing `video` is rejected as restart-required in M0.
 
-The video WebSocket is private to the in-repository frontend. Text messages carry render configuration;
-binary messages carry checked codec generations and AVCC access units. Slow viewers are disconnected
-instead of backpressuring the media owner, and compatibility with out-of-tree clients is not promised.
+The video WebSocket is private to the in-repository frontend. A text message of the form
+`{"type":"stream_state","profile":"minecraft"}` reports the active profile; `profile: null` tells
+the viewer to clear stale pixels and discard decoded frames until a target returns. The server sends
+state when a viewer connects and when the profile changes, independently of shader settings. Text
+messages also carry structured errors; binary messages carry checked codec generations and AVCC
+access units. Slow viewers are disconnected instead of backpressuring the media owner, and
+compatibility with out-of-tree clients is not promised.
 
 ## Lifecycle and failures
 

@@ -1,7 +1,7 @@
 import {
   parseViewerBinaryMessage,
   parseViewerControlMessage,
-  type RenderConfiguration,
+  type StreamState,
 } from "../protocol";
 import { runReconnectingWebSocket, type MarkConnectionHealthy } from "../ws";
 import { H264Decoder } from "./decoder";
@@ -10,8 +10,8 @@ import { H264Decoder } from "./decoder";
 export interface StreamLoopCallbacks {
   /** Receives ownership of a decoded frame, which the renderer must close. */
   readonly onFrame: (frame: VideoFrame) => void;
-  /** Applies shader-only settings without disturbing transport or decoding. */
-  readonly onRenderConfiguration: (configuration: RenderConfiguration) => void;
+  /** Reports target availability independently of URL-owned shader parameters. */
+  readonly onStreamState: (state: StreamState) => void;
   /** Clears stale pixels while disconnected, reconfiguring, or awaiting a keyframe. */
   readonly onWaiting: () => void;
 }
@@ -74,7 +74,7 @@ function serveConnection(
           if (message.type === "error") {
             finish(new Error(`Capture server ${message.code}: ${message.message}`));
           } else {
-            callbacks.onRenderConfiguration(message.configuration);
+            callbacks.onStreamState(message.state);
           }
           return;
         }

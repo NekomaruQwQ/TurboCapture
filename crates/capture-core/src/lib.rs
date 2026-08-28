@@ -14,10 +14,9 @@ pub mod status;
 pub mod video;
 
 pub use config::{
-    ColorKeyKnee, ConfigError, ConfigSnapshot, CropRect, InstanceConfig,
-    RenderConfig, RenderProfiles, RgbColor, SelectionConfig,
-    SelectionProfileConfig, SourceConfig, ValidatedInstanceConfig,
-    ValidationIssue, VideoConfig, load_config,
+    ConfigError, ConfigSnapshot, CropRect, InstanceConfig, SelectionConfig,
+    SelectionProfileConfig, SourceConfig, ValidatedInstanceConfig, ValidationIssue,
+    VideoConfig, load_config,
 };
 pub use selector::{
     ObservationId, ObservedWindow, Selection, SelectionDecision, SelectorPolicy,

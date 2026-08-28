@@ -29,10 +29,6 @@ exclude = []
 width = 1920
 height = 1080
 frame_rate = 60
-
-[render.default]
-key_colors = [[0, 255, 0]]
-color_key_knee = { low = 0.02, high = 0.98 }
 ```
 
 The H.264 bitrate is inferred as `width * height * frame_rate / 4` for the ordinary high-fidelity
@@ -57,6 +53,18 @@ GPU or encoder is tried after selection.
 Open `http://127.0.0.1:4173/#/canvas?port=48100`. The same URL can be used as an iframe or browser
 source; the `port` parameter belongs to the frontend route and selects
 `ws://127.0.0.1:48100/api/video`.
+
+Render settings also belong to the viewer URL, so two viewers of one stream can use different keys
+or foreground colors. For example:
+
+```text
+http://127.0.0.1:4173/#/canvas?port=48100&key_colors=00ff00,01fe01&color_key_knee=0.01,0.20&binarization_color=ffffff
+```
+
+Colors are six-digit RGB hex without `#`. Omitted render parameters mean no keying, knees of
+`0.02,0.98`, and no binarization. Changing only render parameters updates shader uniforms without
+reconnecting; remove a parameter to restore its default. Render settings no longer switch with
+selection profiles. Remove any old `[render.*]` TOML sections; they are now rejected as unknown fields.
 
 For capture on another machine, forward its loopback endpoint onto the viewing machine first:
 

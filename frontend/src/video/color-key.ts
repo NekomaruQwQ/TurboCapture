@@ -114,8 +114,9 @@ void main() {
 
 /// Default smoothstep knees over the unspill ratio in [0,1].  See the
 /// algorithm overview at the top of this file for what each edge does.
-const DEFAULT_KNEE_LOW = 0.02
-const DEFAULT_KNEE_HIGH = 0.98
+export const DEFAULT_KNEE_LOW = 0.02
+/// Default upper smoothstep edge, shared by the renderer and URL parser.
+export const DEFAULT_KNEE_HIGH = 0.98
 
 /// Color-key parameters that may change at runtime.  All fields can be
 /// reassigned via {@link ColorKeyRenderer.updateParams} without rebuilding

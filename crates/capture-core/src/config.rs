@@ -10,14 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::selector::{SelectorPolicy, validate_selection};
 
-/// Maximum number of simultaneous key colors supported by the browser shader.
-pub const MAX_RENDER_KEYS: usize = 8;
-
 /// Four pixel-frames per output bit keeps local low-latency CBR visually conservative.
 const INFERRED_BIT_RATE_PIXEL_FRAME_DIVISOR: u64 = 4;
 
 /// One complete live capture-instance configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceConfig {
     /// Policy controlling which observed window owns the stream.
@@ -27,9 +24,6 @@ pub struct InstanceConfig {
     pub source: SourceConfig,
     /// Fixed encoded output settings that require a process restart to change.
     pub video: VideoConfig,
-    /// Browser rendering parameters, optionally specialized by selected profile.
-    #[serde(default)]
-    pub render: RenderProfiles,
 }
 
 impl InstanceConfig {
@@ -42,7 +36,6 @@ impl InstanceConfig {
         let selector = validate_selection(&mut self.selection, &mut issues);
         validate_source(&self.source, &mut issues);
         validate_video(&self.video, &mut issues);
-        validate_render(&self.selection, &self.render, &mut issues);
 
         if !issues.is_empty() {
             return Err(ConfigError::Invalid { issues });
@@ -140,64 +133,8 @@ impl VideoConfig {
     }
 }
 
-/// Default browser rendering parameters plus per-profile overrides.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RenderProfiles {
-    /// Rendering parameters used while waiting or without an override.
-    #[serde(default)]
-    pub default: RenderConfig,
-    /// Complete rendering overrides keyed by selector profile name.
-    #[serde(default)]
-    pub profiles: BTreeMap<String, RenderConfig>,
-}
-
-impl RenderProfiles {
-    /// Returns the complete render configuration for a selected profile.
-    #[inline]
-    pub fn for_profile(&self, profile: Option<&str>) -> &RenderConfig {
-        profile
-            .and_then(|name| self.profiles.get(name))
-            .unwrap_or(&self.default)
-    }
-}
-
-/// Browser color-key parameters sent independently of decoder configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RenderConfig {
-    /// sRGB colors removed by the browser shader.
-    #[serde(default)]
-    pub key_colors: Vec<RgbColor>,
-    /// Smoothstep range shaping the browser-generated alpha channel.
-    #[serde(default)]
-    pub color_key_knee: ColorKeyKnee,
-    /// Optional constant sRGB color applied while preserving computed alpha.
-    #[serde(default)]
-    pub binarization_color: Option<RgbColor>,
-}
-
-/// One sRGB color represented exactly as three eight-bit channels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct RgbColor(pub [u8; 3]);
-
-/// Smoothstep knee over the color-key alpha estimate.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ColorKeyKnee {
-    /// Values at or below this edge become fully transparent.
-    pub low: f32,
-    /// Values at or above this edge become fully opaque.
-    pub high: f32,
-}
-
-impl Default for ColorKeyKnee {
-    fn default() -> Self { Self { low: 0.02, high: 0.98 } }
-}
-
 /// A complete validated configuration plus normalized selector policy.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedInstanceConfig {
     config: InstanceConfig,
     selector: SelectorPolicy,
@@ -227,16 +164,10 @@ impl ValidatedInstanceConfig {
         }
         Ok(candidate)
     }
-
-    /// Returns browser parameters for a selected profile or the default.
-    #[inline]
-    pub fn render_for_profile(&self, profile: Option<&str>) -> &RenderConfig {
-        self.config.render.for_profile(profile)
-    }
 }
 
 /// One atomically published configuration generation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigSnapshot {
     /// Monotonically increasing generation, beginning at one.
     pub generation: u64,
@@ -386,51 +317,6 @@ fn validate_video(video: &VideoConfig, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-/// Validate renderer limits and ensure overrides name defined selector profiles.
-fn validate_render(
-    selection: &SelectionConfig,
-    render: &RenderProfiles,
-    issues: &mut Vec<ValidationIssue>) {
-    validate_render_config("render.default", &render.default, issues);
-
-    for (profile_name, config) in &render.profiles {
-        let path = format!("render.profiles.{profile_name}");
-        if !selection.profiles.contains_key(profile_name) {
-            issues.push(ValidationIssue::new(
-                &path,
-                "unknown_render_profile",
-                "render override must name a defined selection profile"));
-        }
-        validate_render_config(&path, config, issues);
-    }
-}
-
-/// Validate one complete set of browser shader parameters.
-fn validate_render_config(
-    path: &str,
-    render: &RenderConfig,
-    issues: &mut Vec<ValidationIssue>) {
-    if render.key_colors.len() > MAX_RENDER_KEYS {
-        issues.push(ValidationIssue::new(
-            format!("{path}.key_colors"),
-            "too_many_key_colors",
-            format!("at most {MAX_RENDER_KEYS} key colors are supported")));
-    }
-
-    let knee = render.color_key_knee;
-    if !knee.low.is_finite()
-        || !knee.high.is_finite()
-        || !(0.0..=1.0).contains(&knee.low)
-        || !(0.0..=1.0).contains(&knee.high)
-        || knee.low >= knee.high
-    {
-        issues.push(ValidationIssue::new(
-            format!("{path}.color_key_knee"),
-            "invalid_color_key_knee",
-            "knee must contain finite 0 <= low < high <= 1 values"));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,7 +341,6 @@ mod tests {
                 frame_rate: 60,
                 bit_rate: None,
             },
-            render: RenderProfiles::default(),
         }
     }
 
@@ -464,12 +349,11 @@ mod tests {
         let mut config = valid_config();
         config.source.crop = Some(CropRect { min_x: 5, min_y: 7, max_x: 5, max_y: 6 });
         config.video.width = 1;
-        config.render.default.color_key_knee = ColorKeyKnee { low: 0.8, high: 0.2 };
 
         let ConfigError::Invalid { issues } = config.validate().unwrap_err() else {
             panic!("expected semantic validation failure");
         };
-        assert_eq!(issues.len(), 4);
+        assert_eq!(issues.len(), 3);
     }
 
     #[test]
@@ -583,23 +467,15 @@ mod tests {
     }
 
     #[test]
-    fn render_override_should_require_known_profile() {
-        let mut config = valid_config();
-        config.render.profiles.insert("missing".to_owned(), RenderConfig::default());
+    fn configuration_should_reject_server_owned_render_settings() {
+        let mut config = serde_json::to_value(valid_config()).unwrap();
+        config["render"] = serde_json::json!({ "default": { "key_colors": [[0, 255, 0]] } });
+        let document = format!(
+            "{}\n[render.default]\nkey_colors = [[0, 255, 0]]\n",
+            toml::to_string(&valid_config()).unwrap());
 
-        let ConfigError::Invalid { issues } = config.validate().unwrap_err() else {
-            panic!("expected semantic validation failure");
-        };
-        assert_eq!(issues[0].code, "unknown_render_profile");
-    }
-
-    #[test]
-    fn render_override_should_allow_a_disabled_defined_profile() {
-        let mut config = valid_config();
-        config.selection.enabled.clear();
-        config.render.profiles.insert("code".to_owned(), RenderConfig::default());
-
-        config.validate().unwrap();
+        serde_json::from_value::<InstanceConfig>(config).unwrap_err();
+        toml::from_str::<InstanceConfig>(&document).unwrap_err();
     }
 
     #[test]

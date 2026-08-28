@@ -1,26 +1,7 @@
-/** RGB color with integer components in the inclusive range 0 through 255. */
-export type RgbColor = [number, number, number];
-
-/** Runtime color-key settings carried by a render-configuration message. */
-export interface RenderSettings {
-  /** Background colors removed by the fragment shader. */
-  readonly keyColors: RgbColor[];
-  /** Lower edge of the alpha smoothstep. */
-  readonly kneeLow: number;
-  /** Upper edge of the alpha smoothstep. */
-  readonly kneeHigh: number;
-  /** Optional constant foreground tint, or undefined for normal unspill. */
-  readonly binarizationColor: RgbColor | undefined;
-}
-
-/** Complete viewer-side render configuration sent independently of video data. */
-export interface RenderConfiguration {
-  /** Monotonic server-side configuration generation. */
-  readonly configurationGeneration: number;
+/** Target availability sent independently of video data and URL-owned presentation. */
+export interface StreamState {
   /** Selected profile name, or null while no capture profile is active. */
   readonly profile: string | null;
-  /** Shader parameters that can be updated without restarting the decoder. */
-  readonly render: RenderSettings;
 }
 
 /** Structured server failure sent before the connection closes. */
@@ -32,7 +13,7 @@ export interface ViewerError {
 
 /** Validated text messages accepted from the viewer WebSocket. */
 export type ViewerControlMessage =
-  | { readonly type: "render_configuration"; readonly configuration: RenderConfiguration }
+  | { readonly type: "stream_state"; readonly state: StreamState }
   | ViewerError;
 
 /** Validated H.264 decoder configuration carried by a binary envelope. */
@@ -64,7 +45,6 @@ const HEADER_SIZE = 8;
 const CODEC_MESSAGE = 0x01;
 const ACCESS_UNIT_MESSAGE = 0x02;
 const KEYFRAME_FLAG = 1 << 0;
-const MAX_KEY_COLORS = 8;
 const MAX_PAYLOAD_SIZE = 16 * 1024 * 1024;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -87,54 +67,15 @@ export function parseViewerControlMessage(text: string): ViewerControlMessage {
       message: requireString(message.message, "error message"),
     };
   }
-  if (type !== "render_configuration") {
+  if (type !== "stream_state") {
     throw new Error(`Unsupported viewer control message type: ${type}.`);
   }
 
-  requireExactKeys(
-    message,
-    ["type", "configuration_generation", "profile", "render"],
-    "render-configuration message",
-  );
-  const render = requireObject(message.render, "render settings");
-  requireExactKeys(
-    render,
-    ["key_colors", "color_key_knee", "binarization_color"],
-    "render settings",
-  );
-  const knee = requireObject(render.color_key_knee, "color-key knee");
-  requireExactKeys(knee, ["low", "high"], "color-key knee");
-  const kneeLow = requireFiniteNumber(knee.low, "color-key knee low");
-  const kneeHigh = requireFiniteNumber(knee.high, "color-key knee high");
-  if (kneeLow < 0 || kneeHigh > 1 || kneeLow >= kneeHigh) {
-    throw new Error("Color-key knees must satisfy 0 <= low < high <= 1.");
-  }
-
-  if (!Array.isArray(render.key_colors) || render.key_colors.length > MAX_KEY_COLORS) {
-    throw new Error(`key_colors must be an array containing at most ${MAX_KEY_COLORS} colors.`);
-  }
+  requireExactKeys(message, ["type", "profile"], "stream-state message");
   const profile = message.profile;
-  if (profile !== null && typeof profile !== "string") {
-    throw new Error("profile must be a string or null.");
-  }
-
   return {
     type,
-    configuration: {
-      configurationGeneration: requireSafeInteger(
-        message.configuration_generation,
-        "configuration generation",
-      ),
-      profile,
-      render: {
-        keyColors: render.key_colors.map((color, index) => requireRgb(color, `key_colors[${index}]`)),
-        kneeLow,
-        kneeHigh,
-        binarizationColor: render.binarization_color === null
-          ? undefined
-          : requireRgb(render.binarization_color, "binarization_color"),
-      },
-    },
+    state: { profile: profile === null ? null : requireString(profile, "profile") },
   };
 }
 
@@ -302,36 +243,6 @@ function requireString(value: unknown, name: string): string {
     throw new Error(`${name} must be a non-empty string.`);
   }
   return value;
-}
-
-/** Requires a finite JSON number. */
-function requireFiniteNumber(value: unknown, name: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${name} must be a finite number.`);
-  }
-  return value;
-}
-
-/** Requires a non-negative integer with an exact JavaScript representation. */
-function requireSafeInteger(value: unknown, name: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${name} must be a non-negative safe integer.`);
-  }
-  return value;
-}
-
-/** Requires one three-channel integer RGB tuple. */
-function requireRgb(value: unknown, name: string): RgbColor {
-  if (!Array.isArray(value) || value.length !== 3) {
-    throw new Error(`${name} must contain exactly three channels.`);
-  }
-  const channels = value.map((channel) => {
-    if (typeof channel !== "number" || !Number.isInteger(channel) || channel < 0 || channel > 255) {
-      throw new Error(`${name} channels must be integers from 0 through 255.`);
-    }
-    return channel;
-  });
-  return [channels[0] ?? 0, channels[1] ?? 0, channels[2] ?? 0];
 }
 
 /** Formats one byte as exactly two lowercase hexadecimal digits. */

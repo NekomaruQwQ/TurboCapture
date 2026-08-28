@@ -24,8 +24,8 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     config::{
-        ConfigError, ConfigSnapshot, InstanceConfig, RenderConfig,
-        ValidatedInstanceConfig, ValidationIssue,
+        ConfigError, ConfigSnapshot, InstanceConfig, ValidatedInstanceConfig,
+        ValidationIssue,
     },
     status::{CaptureState, MediaStatus, TargetSummary},
     video::{CodecConfiguration, VideoEvent, encode_event},
@@ -297,7 +297,6 @@ async fn put_config(
 #[derive(Serialize)]
 struct InitializationResponse {
     configuration_generation: u64,
-    render: RenderConfig,
     decoder: Option<DecoderInitialization>,
 }
 
@@ -324,13 +323,10 @@ impl From<&CodecConfiguration> for DecoderInitialization {
     }
 }
 
-/// `GET /api/initialization` returns current render and optional decoder data.
+/// `GET /api/initialization` returns optional decoder data, never presentation settings.
 async fn get_initialization(
     State(state): State<Arc<ServiceState>>) -> Json<InitializationResponse> {
-    let config = state.config.lock().await.clone();
-    let status = state.status_rx.borrow().clone();
-    let profile = status.target.as_ref().map(|target| target.profile.as_str());
-    let render = config.config.render_for_profile(profile).clone();
+    let configuration_generation = state.config.lock().await.generation;
     let decoder = state
         .codec
         .read()
@@ -338,8 +334,7 @@ async fn get_initialization(
         .as_ref()
         .map(DecoderInitialization::from);
     Json(InitializationResponse {
-        configuration_generation: config.generation,
-        render,
+        configuration_generation,
         decoder,
     })
 }
@@ -351,15 +346,14 @@ async fn video_upgrade(
     ws.on_upgrade(move |socket| handle_viewer(socket, state))
 }
 
-/// Per-viewer text message carrying independently mutable render parameters.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Per-viewer lifecycle notifications, independent of URL-owned presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ViewerControlMessage {
-    /// Complete render parameters selected from configuration and media status.
-    RenderConfiguration {
-        configuration_generation: u64,
+    /// Active profile, or no target so the viewer can clear stale pixels.
+    StreamState {
+        /// Selected capture profile; shader parameters belong solely to the viewer URL.
         profile: Option<String>,
-        render: RenderConfig,
     },
     /// The media command boundary was unavailable during viewer startup.
     Error {
@@ -372,15 +366,13 @@ enum ViewerControlMessage {
 async fn handle_viewer(mut socket: WebSocket, state: Arc<ServiceState>) {
     let _viewer = ViewerCountGuard::new(&state.viewer_count);
     let mut video_rx = state.video_tx.subscribe();
-    let mut config_rx = state.config_tx.subscribe();
     let mut status_rx = state.status_rx.clone();
-    let mut last_render = None;
+    let mut last_state = None;
 
-    if send_current_render(
+    if send_current_stream_state(
         &mut socket,
-        &config_rx,
         &status_rx,
-        &mut last_render).await.is_err()
+        &mut last_state).await.is_err()
     {
         return;
     }
@@ -405,24 +397,12 @@ async fn handle_viewer(mut socket: WebSocket, state: Arc<ServiceState>) {
                 Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                 _ => {}
             },
-            changed = config_rx.changed() => {
-                if changed.is_err()
-                    || send_current_render(
-                        &mut socket,
-                        &config_rx,
-                        &status_rx,
-                        &mut last_render).await.is_err()
-                {
-                    break;
-                }
-            }
             changed = status_rx.changed() => {
                 if changed.is_err()
-                    || send_current_render(
+                    || send_current_stream_state(
                         &mut socket,
-                        &config_rx,
                         &status_rx,
-                        &mut last_render).await.is_err()
+                        &mut last_state).await.is_err()
                 {
                     break;
                 }
@@ -475,29 +455,22 @@ async fn forward_video_event(
     Ok(())
 }
 
-/// Send the render configuration matching the latest config and target profile.
-async fn send_current_render(
+/// Notify target changes without resending state for unrelated media counters.
+async fn send_current_stream_state(
     socket: &mut WebSocket,
-    config_rx: &watch::Receiver<ConfigSnapshot>,
     status_rx: &watch::Receiver<MediaStatus>,
-    last_render: &mut Option<ViewerControlMessage>) -> Result<(), ()> {
-    let config = config_rx.borrow().clone();
+    last_state: &mut Option<ViewerControlMessage>) -> Result<(), ()> {
     let profile = status_rx
         .borrow()
         .target
         .as_ref()
         .map(|target| target.profile.clone());
-    let render = config.config.render_for_profile(profile.as_deref()).clone();
-    let message = ViewerControlMessage::RenderConfiguration {
-        configuration_generation: config.generation,
-        profile,
-        render,
-    };
-    if last_render.as_ref() == Some(&message) {
+    let message = ViewerControlMessage::StreamState { profile };
+    if last_state.as_ref() == Some(&message) {
         return Ok(());
     }
     send_control(socket, &message).await?;
-    *last_render = Some(message);
+    *last_state = Some(message);
     Ok(())
 }
 
@@ -663,15 +636,14 @@ mod tests {
 
     use crate::{
         config::{
-            RenderProfiles, SelectionConfig, SelectionProfileConfig, SourceConfig,
-            VideoConfig,
+            SelectionConfig, SelectionProfileConfig, SourceConfig, VideoConfig,
         },
         video::{AccessUnit, CodecConfiguration, VideoMessage, decode_message},
     };
 
     use super::*;
 
-    /// Complete valid test configuration with one render-aware profile.
+    /// Complete valid test configuration with one selection profile.
     fn test_config() -> InstanceConfig {
         InstanceConfig {
             selection: SelectionConfig {
@@ -691,7 +663,6 @@ mod tests {
                 frame_rate: 60,
                 bit_rate: None,
             },
-            render: RenderProfiles::default(),
         }
     }
 
@@ -804,7 +775,22 @@ mod tests {
         panic!("viewer count did not reach {expected}");
     }
 
-    /// Read until one access unit arrives, ignoring render and decoder setup.
+    /// Receive one bounded text notification; binary data is unexpected in state-only tests.
+    async fn receive_control(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> serde_json::Value {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let tungstenite::Message::Text(text) = message else {
+            panic!("viewer should receive a text control message");
+        };
+        serde_json::from_str(text.as_ref()).unwrap()
+    }
+
+    /// Read until one access unit arrives, ignoring stream state and decoder setup.
     async fn receive_access_unit(
         socket: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> AccessUnit {
@@ -892,6 +878,20 @@ mod tests {
         let body = response_json(response).await;
 
         assert!(body.get("diagnostic").is_none());
+    }
+
+    #[tokio::test]
+    async fn initialization_should_only_expose_configuration_generation_and_decoder() {
+        let (router, _host) = test_service();
+        let response = router
+            .oneshot(Request::get("/api/initialization").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response_json(response).await, serde_json::json!({
+            "configuration_generation": 1,
+            "decoder": null,
+        }));
     }
 
     #[tokio::test]
@@ -1031,6 +1031,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn viewer_should_receive_initial_state_profile_changes_and_target_loss() {
+        let (router, host) = test_service();
+        let (address, server) = spawn_test_server(router).await;
+        let (mut socket, _) = connect_async(format!("ws://{address}/api/video"))
+            .await
+            .unwrap();
+        assert_eq!(receive_control(&mut socket).await, serde_json::json!({
+            "type": "stream_state", "profile": null,
+        }));
+
+        for profile in ["code", "game"] {
+            host.status.send_replace(MediaStatus {
+                state: CaptureState::Capturing,
+                target: Some(TargetSummary {
+                    profile: profile.to_owned(),
+                    executable_name: "app.exe".to_owned(),
+                    title: "captured window".to_owned(),
+                }),
+                ..MediaStatus::default()
+            });
+            assert_eq!(receive_control(&mut socket).await, serde_json::json!({
+                "type": "stream_state", "profile": profile,
+            }));
+        }
+
+        host.status.send_replace(MediaStatus::default());
+        assert_eq!(receive_control(&mut socket).await, serde_json::json!({
+            "type": "stream_state", "profile": null,
+        }));
+
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn reconnecting_viewer_should_require_a_distinct_fresh_keyframe() {
         let (router, host) = test_service();
         host.video
@@ -1118,16 +1153,8 @@ mod tests {
         let (mut socket, _) = connect_async(format!("ws://{address}/api/video"))
             .await
             .unwrap();
-        let control = tokio::time::timeout(Duration::from_secs(2), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let tungstenite::Message::Text(control) = control else {
-            panic!("viewer should receive render configuration before video");
-        };
-        let control: serde_json::Value = serde_json::from_str(control.as_ref()).unwrap();
-        assert_eq!(control["type"], "render_configuration");
+        let control = receive_control(&mut socket).await;
+        assert_eq!(control, serde_json::json!({ "type": "stream_state", "profile": null }));
 
         let mut codec_generation = None;
         let mut keyframe_timestamps = Vec::new();
