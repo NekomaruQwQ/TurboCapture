@@ -1,5 +1,3 @@
-# @human-maintained
-
 # build artifacts
 node_modules/
 dist/

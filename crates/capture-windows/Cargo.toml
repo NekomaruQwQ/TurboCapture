@@ -6,6 +6,10 @@ edition = { workspace = true }
 [lints]
 workspace = true
 
+[dependencies.winrt-capture]
+git = "https://github.com/NekomaruQwQ/Nekomaru-Rust.git"
+rev = "42b84a93"
+
 [dependencies]
 capture-core = { path = "../capture-core" }
 
@@ -16,9 +20,9 @@ euclid = "0.22.14"
 log = "0.4.34"
 pretty_env_logger = "0.5.0"
 tokio = { workspace = true }
-winrt-capture = { git = "https://github.com/NekomaruQwQ/Nekomaru-Rust.git", rev = "42b84a93" }
 
-windows-core = "0.62.2" # required for the `windows::core::implement` macro
+# NOTE: `windows-core` is required for the `windows::core::implement` macro.
+windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Graphics_Capture",
